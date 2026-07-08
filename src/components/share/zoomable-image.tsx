@@ -20,7 +20,10 @@ interface ZoomableImageProps {
 /**
  * ページ縦スクロールと両立させるため、拡大していない(scale===1)間はpanningを無効化し、
  * 一本指の縦ドラッグがページの通常スクロールとして機能するようにする。
- * ピンチ(2本指)とダブルタップは常に有効なため、ズームイン操作自体は妨げられない。
+ * requireTapToActivateがtrueの場合、最初に画像をタップするまではピンチ/ダブルタップズームも
+ * 無効化する(スクロール中の誤操作防止)。ズームを塞ぐのはpinch/doubleClickの`disabled`設定のみで、
+ * 画像の上に透明な要素を重ねる方式は使わない(重ねるとブラウザのimg長押し保存メニューが
+ * 出せなくなるため)。
  */
 export function ZoomableImage({
   src,
@@ -44,8 +47,8 @@ export function ZoomableImage({
         minScale={1}
         maxScale={4}
         centerOnInit
-        doubleClick={{ mode: "toggle", step: 2.5 }}
-        pinch={{ step: 5 }}
+        doubleClick={{ mode: "toggle", step: 2.5, disabled: !activated }}
+        pinch={{ step: 5, disabled: !activated }}
         panning={{ disabled: !zoomed }}
         onTransform={handleTransform}
       >
@@ -71,23 +74,14 @@ export function ZoomableImage({
             }
             // react-zoom-pan-pinchのデフォルトCSS(.content img { pointer-events: none })と
             // -webkit-touch-callout: none(iOSの長押し保存メニュー無効化)を打ち消し、
-            // 閲覧者が画像を長押し/右クリックで保存できるようにする。
+            // 閲覧者が画像を長押し/右クリックで(最初のタップ前でも)保存できるようにする。
             style={{ pointerEvents: "auto", WebkitTouchCallout: "default" }}
             draggable={false}
             loading="lazy"
+            onClick={() => setActivated(true)}
           />
         </TransformComponent>
       </TransformWrapper>
-      {!activated && (
-        // タップするまでピンチ/ダブルタップズーム・パンを丸ごと奪う透明なオーバーレイ。
-        // TransformWrapper内部の個別設定に手を入れるより単純かつ確実。
-        <button
-          type="button"
-          onClick={() => setActivated(true)}
-          aria-label="タップして操作を有効化"
-          className="absolute inset-0 z-10 cursor-zoom-in"
-        />
-      )}
     </div>
   );
 }
