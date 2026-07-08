@@ -32,6 +32,8 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
   const zoomRef = useRef<ReactZoomPanPinchRef>(null);
   const drawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  // 2本指以上になった時点で描画をやめてピンチズームに操作を譲るため、指の本数を追跡する
+  const activePointersRef = useRef<Set<number>>(new Set());
 
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE);
@@ -93,6 +95,13 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
+    activePointersRef.current.add(event.pointerId);
+    if (activePointersRef.current.size > 1) {
+      // 2本指目が触れた=ピンチズーム操作なので、描画は開始・継続しない
+      drawingRef.current = false;
+      lastPointRef.current = null;
+      return;
+    }
     const point = getCanvasPoint(event);
     if (!point) return;
     if (pickingColor) {
@@ -108,6 +117,7 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (activePointersRef.current.size > 1) return;
     if (!drawingRef.current) return;
     const point = getCanvasPoint(event);
     if (!point || !lastPointRef.current) return;
@@ -115,7 +125,8 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
     lastPointRef.current = point;
   }
 
-  function handlePointerUp() {
+  function handlePointerUp(event: React.PointerEvent<HTMLCanvasElement>) {
+    activePointersRef.current.delete(event.pointerId);
     drawingRef.current = false;
     lastPointRef.current = null;
   }
@@ -160,6 +171,7 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerLeave={handlePointerUp}
+              onPointerCancel={handlePointerUp}
               className={`mx-auto max-h-[60vh] w-auto max-w-full touch-none ${pickingColor ? "cursor-crosshair" : ""}`}
             />
           </TransformComponent>

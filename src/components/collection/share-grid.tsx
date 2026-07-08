@@ -4,6 +4,7 @@ import { useState, type KeyboardEvent, type MouseEvent } from "react";
 import { formatDateTime } from "@/lib/format";
 import { downloadImage } from "@/lib/image/download";
 import { DownloadIcon } from "@/components/ui/download-icon";
+import { LockIcon } from "@/components/ui/lock-icon";
 import { ShareLightbox } from "@/components/share/share-lightbox";
 
 export interface GridShare {
@@ -55,7 +56,7 @@ export function ShareGrid({ shares }: { shares: GridShare[] }) {
             >
               <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-2xl bg-surface">
                 {share.hasPassword || share.pageCount === 0 ? (
-                  <span className="text-4xl">🔒</span>
+                  <LockIcon className="h-10 w-10 text-foreground/25" />
                 ) : (
                   <>
                     {/* eslint-disable-next-line @next/next/no-img-element -- サムネイルは自前APIの画像をそのまま縮小表示するだけのため */}

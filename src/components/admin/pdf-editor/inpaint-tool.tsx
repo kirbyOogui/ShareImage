@@ -43,6 +43,8 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
   const zoomRef = useRef<ReactZoomPanPinchRef>(null);
   const drawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  // 2本指以上になった時点で塗りをやめてピンチズームに操作を譲るため、指の本数を追跡する
+  const activePointersRef = useRef<Set<number>>(new Set());
   const hasMaskRef = useRef(false);
   const boundsRef = useRef<Bounds | null>(null);
 
@@ -138,6 +140,13 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
+    activePointersRef.current.add(event.pointerId);
+    if (activePointersRef.current.size > 1) {
+      // 2本指目が触れた=ピンチズーム操作なので、塗りは開始・継続しない
+      drawingRef.current = false;
+      lastPointRef.current = null;
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = getCanvasPoint(event);
     if (!point) return;
@@ -152,6 +161,7 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (activePointersRef.current.size > 1) return;
     if (!drawingRef.current) return;
     const point = getCanvasPoint(event);
     if (!point || !lastPointRef.current) return;
@@ -159,7 +169,8 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
     lastPointRef.current = point;
   }
 
-  function handlePointerUp() {
+  function handlePointerUp(event: React.PointerEvent<HTMLCanvasElement>) {
+    activePointersRef.current.delete(event.pointerId);
     drawingRef.current = false;
     lastPointRef.current = null;
   }
@@ -276,6 +287,7 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerLeave={handlePointerUp}
+              onPointerCancel={handlePointerUp}
               className="mx-auto max-h-[60vh] w-auto max-w-full touch-none"
             />
           </TransformComponent>

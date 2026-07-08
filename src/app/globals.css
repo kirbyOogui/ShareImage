@@ -32,6 +32,12 @@ html {
      ネイティブジェスチャーを無効化し、アプリらしく他ページへのスワイプ遷移を防ぐ
      (Androidの画面端スワイプによるOSレベルの「戻る」操作はWeb側から制御できないため対象外)。 */
   overscroll-behavior: none;
+  /* ホーム画面追加のstandalone PWA(iOS)では、overscroll-behaviorだけではスワイプで前の
+     画面に戻るジェスチャーを防ぎきれなかったため、横方向のパン操作自体をブラウザに
+     ネイティブハンドリングさせないtouch-actionを併用する(縦スクロール・ピンチズームは許可)。
+     この制限は子要素に上書きできない(CSS仕様上の制約)ため、横スクロールが必要な要素
+     (PDF編集のページサムネイル一覧)は独自のドラッグスクロール実装で個別に対応している。 */
+  touch-action: pan-y pinch-zoom;
 }
 
 body {
@@ -40,4 +46,5 @@ body {
   font-family: var(--font-sans);
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
+  touch-action: pan-y pinch-zoom;
 }
