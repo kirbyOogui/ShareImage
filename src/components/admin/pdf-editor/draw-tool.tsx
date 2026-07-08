@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
 import { Button } from "@/components/ui/button";
 import { loadImage } from "@/lib/image/load-image";
 import type { EditResult } from "./types";
@@ -28,6 +29,7 @@ function pixelToHex(data: Uint8ClampedArray): string {
  */
 export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const zoomRef = useRef<ReactZoomPanPinchRef>(null);
   const drawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -140,17 +142,37 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
         キャンバス上をなぞって自由に描画できます。「スポイトで拾う」を押してから画像上をタップすると、
         その部分の色をそのまま描画色として使えます。
       </p>
-      <div className="flex justify-center overflow-hidden rounded-2xl border border-border bg-surface">
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-          className={`max-h-[60vh] w-auto touch-none ${pickingColor ? "cursor-crosshair" : ""}`}
-        />
+      <div className="overflow-hidden rounded-2xl border border-border bg-surface">
+        <TransformWrapper
+          ref={zoomRef}
+          initialScale={1}
+          minScale={1}
+          maxScale={4}
+          panning={{ disabled: true }}
+          pinch={{ step: 5 }}
+          doubleClick={{ disabled: true }}
+          wheel={{ step: 0.2 }}
+        >
+          <TransformComponent wrapperStyle={{ width: "100%" }} contentStyle={{ width: "100%" }}>
+            <canvas
+              ref={canvasRef}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={handlePointerUp}
+              className={`mx-auto max-h-[60vh] w-auto max-w-full touch-none ${pickingColor ? "cursor-crosshair" : ""}`}
+            />
+          </TransformComponent>
+        </TransformWrapper>
       </div>
       <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => zoomRef.current?.resetTransform()}
+          className="rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70 transition-colors"
+        >
+          ズームを戻す
+        </button>
         <label className="flex items-center gap-2 text-sm text-foreground/60">
           色
           <input

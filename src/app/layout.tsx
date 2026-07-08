@@ -34,6 +34,13 @@ export const viewport: Viewport = {
   themeColor: "#ffffff",
   width: "device-width",
   initialScale: 1,
+  // スマホ/タブレットでのブラウザ標準のピンチズーム(画面全体がズレる原因)を無効化する。
+  // 画像の拡大表示自体はreact-zoom-pan-pinchによる各コンポーネント内蔵のズームで提供する。
+  maximumScale: 1,
+  userScalable: false,
+  // ノッチ/ホームインジケーター領域までレイアウトを広げ、env(safe-area-inset-*)を有効にする
+  // (これが無いとsafe-area-inset系のCSSは常に0扱いになり、下部タブバー等の余白計算が効かない)。
+  viewportFit: "cover",
 };
 
 export default async function RootLayout({

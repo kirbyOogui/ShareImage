@@ -71,7 +71,10 @@ export default async function CollectionPage({
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <div className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur-md">
+      <div
+        className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur-md
+          pt-[env(safe-area-inset-top)]"
+      >
         <div className="mx-auto max-w-2xl px-4 py-5 lg:max-w-4xl">
           <PageHeader
             icon={

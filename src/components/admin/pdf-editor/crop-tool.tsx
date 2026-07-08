@@ -69,7 +69,7 @@ export function CropTool({ dataUrl, onApply }: CropToolProps) {
           onComplete={(c) => setPixelCrop(c)}
         >
           {/* eslint-disable-next-line @next/next/no-img-element -- クロップ範囲選択のためreact-image-cropが直接img要素を必要とする */}
-          <img ref={imgRef} src={dataUrl} alt="編集中のページ" className="max-h-[60vh] w-auto" />
+          <img ref={imgRef} src={dataUrl} alt="編集中のページ" className="mx-auto max-h-[60vh] w-auto max-w-full" />
         </ReactCrop>
       </div>
       {error && <p className="text-sm text-red-600">{error}</p>}

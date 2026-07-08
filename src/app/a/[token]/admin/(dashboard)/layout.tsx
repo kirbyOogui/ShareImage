@@ -28,7 +28,10 @@ export default async function AdminLayout({
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur-md">
+      <header
+        className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur-md
+          pt-[env(safe-area-inset-top)]"
+      >
         <div className="mx-auto max-w-3xl px-6 py-4">
           <PageHeader
             icon={
@@ -47,7 +50,7 @@ export default async function AdminLayout({
           />
         </div>
       </header>
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-8 pb-28">{children}</main>
+      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-8 pb-32">{children}</main>
       <BottomTabBar token={token} />
     </div>
   );

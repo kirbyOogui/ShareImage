@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
 import { Button } from "@/components/ui/button";
 import { loadImage } from "@/lib/image/load-image";
 import type { EditResult } from "./types";
@@ -39,6 +40,7 @@ interface Bounds {
 export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProps) {
   const displayCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
+  const zoomRef = useRef<ReactZoomPanPinchRef>(null);
   const drawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const hasMaskRef = useRef(false);
@@ -256,18 +258,38 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
         「AIで消す」を押してください。AIが周囲から自然に補完します(塗った範囲の周辺だけを
         処理するため、ページの他の部分が変化することはありません)。
       </p>
-      <div className="flex justify-center overflow-hidden rounded-2xl border border-border bg-surface">
-        <canvas
-          ref={displayCanvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-          className="max-h-[60vh] w-auto touch-none"
-        />
+      <div className="overflow-hidden rounded-2xl border border-border bg-surface">
+        <TransformWrapper
+          ref={zoomRef}
+          initialScale={1}
+          minScale={1}
+          maxScale={4}
+          panning={{ disabled: true }}
+          pinch={{ step: 5 }}
+          doubleClick={{ disabled: true }}
+          wheel={{ step: 0.2 }}
+        >
+          <TransformComponent wrapperStyle={{ width: "100%" }} contentStyle={{ width: "100%" }}>
+            <canvas
+              ref={displayCanvasRef}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={handlePointerUp}
+              className="mx-auto max-h-[60vh] w-auto max-w-full touch-none"
+            />
+          </TransformComponent>
+        </TransformWrapper>
         <canvas ref={maskCanvasRef} className="hidden" />
       </div>
       <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => zoomRef.current?.resetTransform()}
+          className="shrink-0 rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70 transition-colors"
+        >
+          ズームを戻す
+        </button>
         <span className="text-sm text-foreground/50 shrink-0">ブラシの太さ</span>
         <input
           type="range"

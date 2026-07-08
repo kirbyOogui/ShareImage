@@ -72,7 +72,7 @@ export function BottomTabBar({ token }: { token: string }) {
   return (
     <nav
       className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-background/85 backdrop-blur-md
-        pb-[env(safe-area-inset-bottom)]"
+        pb-[calc(env(safe-area-inset-bottom)+0.5rem)]"
     >
       <div className="mx-auto flex max-w-3xl">
         {tabs.map(({ href, label, Icon, active }) => (
