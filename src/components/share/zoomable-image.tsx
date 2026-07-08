@@ -15,6 +15,38 @@ interface ZoomableImageProps {
    * 縮小表示する。1ページのみの共有をスクロール無しで画面内に収めるためのモード。
    */
   fitContainer?: boolean;
+  /** 保存ボタン押下時にダウンロードされるファイル名(拡張子は実際のContent-Typeから自動付与) */
+  downloadName?: string;
+}
+
+const EXTENSION_BY_MIME: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
+
+/** ファイル名として使えない文字("/"や制御文字など)を"_"に置き換える */
+function sanitizeFilename(name: string): string {
+  return name.replace(/[/\\?%*:|"<>\x00-\x1f]/g, "_").trim() || "image";
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-5 w-5"
+      aria-hidden="true"
+    >
+      <path d="M12 3v12" />
+      <path d="M7.5 10.5 12 15l4.5-4.5" />
+      <path d="M4.5 18.75h15" />
+    </svg>
+  );
 }
 
 /**
@@ -32,13 +64,35 @@ export function ZoomableImage({
   alt,
   requireTapToActivate = false,
   fitContainer = false,
+  downloadName = "image",
 }: ZoomableImageProps) {
   const [zoomed, setZoomed] = useState(false);
   const [activated, setActivated] = useState(!requireTapToActivate);
+  const [downloading, setDownloading] = useState(false);
 
   const handleTransform = useCallback((_ref: ReactZoomPanPinchRef, state: { scale: number }) => {
     setZoomed(state.scale > 1.01);
   }, []);
+
+  async function handleDownload() {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const res = await fetch(src);
+      const blob = await res.blob();
+      const extension = EXTENSION_BY_MIME[blob.type] ?? "jpg";
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = `${sanitizeFilename(downloadName)}.${extension}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   return (
     <div className={`relative ${fitContainer ? "h-full" : ""}`}>
@@ -82,6 +136,16 @@ export function ZoomableImage({
           />
         </TransformComponent>
       </TransformWrapper>
+      <button
+        type="button"
+        onClick={handleDownload}
+        disabled={downloading}
+        aria-label="画像を保存"
+        className="absolute right-3 top-3 z-10 flex h-10 w-10 items-center justify-center rounded-full
+          bg-black/50 text-white backdrop-blur-sm transition-colors hover:bg-black/70 disabled:opacity-50"
+      >
+        <DownloadIcon />
+      </button>
     </div>
   );
 }

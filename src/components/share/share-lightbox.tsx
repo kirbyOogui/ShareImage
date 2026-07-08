@@ -143,6 +143,7 @@ export function ShareLightbox({ shareId, title, hasPassword, hasPdf, pages, onCl
                 alt="1ページ"
                 requireTapToActivate
                 fitContainer
+                downloadName={title ? `${title}` : `${shareId}-page1`}
               />
             </div>
           </div>
@@ -157,6 +158,7 @@ export function ShareLightbox({ shareId, title, hasPassword, hasPdf, pages, onCl
                 height={page.height}
                 alt={`${page.pageNumber}ページ`}
                 requireTapToActivate
+                downloadName={`${title ? `${title}-` : ""}page${page.pageNumber}`}
               />
             ))}
           </div>
