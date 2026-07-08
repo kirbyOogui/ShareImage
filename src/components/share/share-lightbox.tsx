@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { PasswordForm } from "./password-form";
-import { PushSubscribeButton } from "./push-subscribe-button";
 import { ZoomableImage } from "./zoomable-image";
 
 interface PageMeta {
@@ -122,7 +121,6 @@ export function ShareLightbox({ shareId, title, hasPassword, hasPdf, pages, onCl
         ) : hasPdf ? (
           // 画面の縦幅いっぱいを使い、スクロール無しでPDFの1ページ目全体が見えるようにする
           <div className="mx-auto flex h-full min-h-0 max-w-4xl flex-col gap-3 pt-3">
-            <PushSubscribeButton shareId={shareId} />
             <iframe
               src={`/api/share/${shareId}/file`}
               title={title || "PDF"}
@@ -134,7 +132,6 @@ export function ShareLightbox({ shareId, title, hasPassword, hasPdf, pages, onCl
         ) : pages.length === 1 ? (
           // 1ページのみの共有は、画像全体がスクロール無しで画面に収まるように縮小表示する
           <div className="mx-auto flex h-full min-h-0 max-w-2xl flex-col gap-3 pt-3">
-            <PushSubscribeButton shareId={shareId} />
             <div className="min-h-0 flex-1">
               <ZoomableImage
                 src={`/api/share/${shareId}/pages/${pages[0].pageNumber}`}
@@ -149,7 +146,6 @@ export function ShareLightbox({ shareId, title, hasPassword, hasPdf, pages, onCl
           </div>
         ) : (
           <div className="mx-auto flex max-w-2xl flex-col gap-6 pt-3">
-            <PushSubscribeButton shareId={shareId} />
             {pages.map((page) => (
               <ZoomableImage
                 key={page.pageNumber}

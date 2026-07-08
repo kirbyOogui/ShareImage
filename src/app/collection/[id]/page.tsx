@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { isShareExpired } from "@/lib/share/expiry";
 import { getGalleryPath } from "@/lib/gallery";
 import { ShareGrid } from "@/components/collection/share-grid";
+import { SubscribeUpdatesButton } from "@/components/collection/subscribe-updates-button";
 import { InstallPromptButton } from "@/components/share/install-prompt-button";
 import { PageHeader } from "@/components/ui/page-header";
 import { NavActionButton } from "@/components/ui/nav-action-button";
@@ -104,6 +105,7 @@ export default async function CollectionPage({
 
       <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-4 py-6 lg:max-w-4xl">
         <InstallPromptButton />
+        <SubscribeUpdatesButton />
 
         {visibleShares.length === 0 ? (
           <p className="text-center text-sm text-foreground/40">まだ共有はありません</p>

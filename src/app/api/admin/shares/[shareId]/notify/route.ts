@@ -18,7 +18,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   const body = await request.json().catch(() => null);
   const message = typeof body?.message === "string" ? body.message.trim().slice(0, 200) : "";
 
-  const subscriptions = await prisma.pushSubscription.findMany({ where: { shareId } });
+  // 購読は個別の共有ではなくギャラリー全体に対して行われるため、共有IDでは絞り込まない
+  const subscriptions = await prisma.pushSubscription.findMany();
   if (subscriptions.length === 0) {
     return NextResponse.json({ ok: true, sent: 0, total: 0 });
   }

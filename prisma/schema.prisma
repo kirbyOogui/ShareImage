@@ -32,7 +32,6 @@ model Share {
   updatedAt        DateTime    @updatedAt
 
   pages         Page[]
-  subscriptions PushSubscription[]
   loginAttempts ShareLoginAttempt[]
 
   @@index([expiresAt])
@@ -54,17 +53,15 @@ model Page {
   @@index([shareId])
 }
 
+// 個別の共有ごとではなく、ギャラリー(一覧ページ)全体の更新通知を購読する。
+// このアプリはギャラリーが常に1つだけの仕様のため、どの共有にも紐付かない。
 model PushSubscription {
   id        String   @id
-  shareId   String
-  share     Share    @relation(fields: [shareId], references: [id], onDelete: Cascade)
   endpoint  String   @unique
   p256dh    String
   auth      String
   userAgent String?
   createdAt DateTime @default(now())
-
-  @@index([shareId])
 }
 
 // 閲覧パスワードのブルートフォース対策。プロセス再起動をまたいでロックアウト状態を保持するためDBに永続化する。
