@@ -2,6 +2,8 @@
 
 import { useCallback, useState } from "react";
 import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
+import { downloadImage } from "@/lib/image/download";
+import { DownloadIcon } from "@/components/ui/download-icon";
 
 interface ZoomableImageProps {
   src: string;
@@ -17,36 +19,6 @@ interface ZoomableImageProps {
   fitContainer?: boolean;
   /** 保存ボタン押下時にダウンロードされるファイル名(拡張子は実際のContent-Typeから自動付与) */
   downloadName?: string;
-}
-
-const EXTENSION_BY_MIME: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-};
-
-/** ファイル名として使えない文字("/"や制御文字など)を"_"に置き換える */
-function sanitizeFilename(name: string): string {
-  return name.replace(/[/\\?%*:|"<>\x00-\x1f]/g, "_").trim() || "image";
-}
-
-function DownloadIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-5 w-5"
-      aria-hidden="true"
-    >
-      <path d="M12 3v12" />
-      <path d="M7.5 10.5 12 15l4.5-4.5" />
-      <path d="M4.5 18.75h15" />
-    </svg>
-  );
 }
 
 /**
@@ -78,17 +50,7 @@ export function ZoomableImage({
     if (downloading) return;
     setDownloading(true);
     try {
-      const res = await fetch(src);
-      const blob = await res.blob();
-      const extension = EXTENSION_BY_MIME[blob.type] ?? "jpg";
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = objectUrl;
-      a.download = `${sanitizeFilename(downloadName)}.${extension}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(objectUrl);
+      await downloadImage(src, downloadName);
     } finally {
       setDownloading(false);
     }
