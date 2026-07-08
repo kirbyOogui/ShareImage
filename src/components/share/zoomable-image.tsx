@@ -69,6 +69,10 @@ export function ZoomableImage({
                 ? "h-auto max-h-full w-auto max-w-full select-none rounded-2xl border border-border object-contain"
                 : "mx-auto h-auto max-h-[85dvh] w-auto max-w-full select-none rounded-2xl border border-border object-contain"
             }
+            // react-zoom-pan-pinchのデフォルトCSS(.content img { pointer-events: none })と
+            // -webkit-touch-callout: none(iOSの長押し保存メニュー無効化)を打ち消し、
+            // 閲覧者が画像を長押し/右クリックで保存できるようにする。
+            style={{ pointerEvents: "auto", WebkitTouchCallout: "default" }}
             draggable={false}
             loading="lazy"
           />
