@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  /* iOS設定アプリのような「うっすらグレーの背景+白いカードが浮く」質感にするため、
+     背景は純白ではなくsystemGroupedBackground相当の薄いグレーにしている。
+     カード(bg-white)との明確なコントラストを保つため、--surfaceも合わせて少し濃くした。 */
+  --background: #f5f6f7;
+  --foreground: #1d1d1f;
+  --accent: #ff3b30;
+  --accent-foreground: #ffffff;
+  --surface: #ebedf0;
+  --border: #e2e4e7;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic", "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Apple風のミニマルなUIを基調とするため、常にライトモード基調(ダークモード自動切替はしない) */
+html {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+}

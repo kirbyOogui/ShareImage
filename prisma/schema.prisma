@@ -1,0 +1,82 @@
+// Prisma schema
+// 本番はSupabase Postgresを使用(Vercel等のサーバーレス環境ではローカルSQLiteが永続しないため)。
+// 接続文字列は prisma.config.ts(CLI/マイグレーション用、DIRECT_URL)と
+// src/lib/prisma.ts(実行時用Driver Adapter、DATABASE_URL=pooler接続)の2箇所で個別に指定する。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ShareStatus {
+  ACTIVE
+  EXPIRED
+}
+
+model Share {
+  id               String      @id
+  title            String?
+  originalFilename String?
+  passwordHash     String?
+  expiresAt        DateTime?
+  status           ShareStatus @default(ACTIVE)
+  pageCount        Int         @default(0)
+  // 非nullの場合、この共有は画像へ変換せず元のPDFのまま保存されている
+  // (pagesには一覧サムネイル用の1ページ目の画像のみが入る)。
+  pdfStorageKey    String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  pages         Page[]
+  subscriptions PushSubscription[]
+  loginAttempts ShareLoginAttempt[]
+
+  @@index([expiresAt])
+  @@index([status])
+}
+
+model Page {
+  id         String   @id
+  shareId    String
+  share      Share    @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  pageNumber Int
+  storageKey String
+  width      Int
+  height     Int
+  byteSize   Int
+  createdAt  DateTime @default(now())
+
+  @@unique([shareId, pageNumber])
+  @@index([shareId])
+}
+
+model PushSubscription {
+  id        String   @id
+  shareId   String
+  share     Share    @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([shareId])
+}
+
+// 閲覧パスワードのブルートフォース対策。プロセス再起動をまたいでロックアウト状態を保持するためDBに永続化する。
+model ShareLoginAttempt {
+  id            String    @id
+  shareId       String
+  share         Share     @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  ipHash        String
+  failCount     Int       @default(0)
+  lockedUntil   DateTime?
+  lastAttemptAt DateTime  @default(now())
+
+  @@unique([shareId, ipHash])
+  @@index([shareId])
+}

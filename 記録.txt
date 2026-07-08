@@ -1,0 +1,1415 @@
+# 記録.txt — PDF掲示物共有PWA 開発ログ
+
+## 2026-07-06
+
+### プロンプト概要
+ユーザーより「社内掲示物をスマホで簡単・安全に閲覧できるWebサービス」の新規開発依頼。
+PDFアップロード→ページ毎にWebP画像へ変換→ランダムURL共有→パスワード保護→PWA対応→Push通知、という閲覧専用サービス。
+技術構成: Next.js(App Router) + TypeScript + Tailwind CSS。アプリアイコンは提供されたPNG
+(`ChatGPT Image 2026年7月6日 21_24_07.png`)を使用。
+
+### 設計フェーズ
+- Plan modeで事前設計を実施。ユーザーへの確認事項:
+  1. DB/ストレージ構成 → 「ローカル完結・即実行可能(Prisma+SQLite、ローカルディスク)」を選択。
+     将来Postgres/R2/Supabase Storageへ移行できる抽象化を必須要件として設計。
+  2. 管理画面認証 → 「共有の管理者パスワード1つ」を選択(単一パスワード、bcryptjsハッシュ照合)。
+  3. Push通知送信タイミング → 「管理画面の『通知送信』ボタンを押した時のみ」を選択(自動送信はしない)。
+- Plan agentにPDF→画像変換パイプラインの技術調査を依頼。結論:
+  `pdfjs-dist`(legacy build) + `@napi-rs/canvas`(Windows prebuiltバイナリで安定) + `sharp`(WebPエンコード)。
+  DB: Prisma+SQLite、ID生成: nanoid(24)、セッション: jose(HS256)、PWA: @serwist/next、
+  Push: web-push(VAPID)、期限切れ削除: node-cron(instrumentation.tsで起動時登録)。
+- 最終プランをユーザー承認済み(保存先: `C:\Users\PC_User\.claude\plans\concurrent-launching-plum.md`)。
+
+### 実装ログ
+
+- **Step 0 開始**: `create-next-app@latest` はプロジェクトディレクトリ名「PDF共有アプリ」がnpmパッケージ名規則
+  (URL-friendly、小文字のみ)に違反するため直接実行できず。スクラッチパッド配下に仮名`pdf-share-app`で
+  scaffoldしてから、生成物(node_modules, src, public, package.json 等)をプロジェクトルートへ移動する方式で対応。
+  生成された`AGENTS.md`/`CLAUDE.md`(Next.js汎用のテンプレート)は移動前に削除。
+
+- **異物ファイルの発見**: scaffold後、プロジェクトルートに日付6/27付の`CLAUDE.md`(LINEボット/シフト計算/
+  Python前提の内容、他プロジェクト由来と推測)が出現していることに気づく。初回の`ls`確認時(PNG1枚のみ)には
+  存在しなかったため、クラウド同期等の遅延で後から同期されてきた可能性が高いと判断し、ユーザーに確認。
+  → ユーザーの指示: 「そのままCLAUDE.mdとして反映する」。よって以下の方針で運用:
+    - 日本語でコメントを出力する(コメントを書く際は日本語)。
+    - package.json等の依存関係が未インストールの場合は自動インストールする。
+    - ファイルの作成・上書きは都度確認せずに実行する。
+    - このファイル(記録.txt)にプロンプト・実行内容・エラー・追加機能を都度記録する。
+    - CLAUDE.md内の「プロジェクト構成ルール」(main.py/line_service.py等)は別プロジェクト(LINEボット)の
+      ものであり本プロジェクトには適用しない。今回はユーザー明示のNext.js/TypeScript仕様に従う。
+
+- **Step 0 完了**: `npm run dev` でデフォルトページ起動確認済み。git initも実施(まだコミットはしていない)。
+  未使用のboilerplate SVG類は削除。
+
+- **Step 1 完了(Prisma + Storage抽象化)**:
+  - Prisma 7.8.0を導入。Prisma 7の新generator `prisma-client`(ESM出力、`src/generated/prisma`)を採用。
+    このバージョンから**PrismaClientの実行時接続がDriver Adapter必須**に変更されており(接続文字列を
+    直接渡す旧方式は廃止)、SQLite用に `@prisma/adapter-better-sqlite3` + `better-sqlite3` を追加導入。
+    Windows上でもprebuiltバイナリでネイティブビルド無しにインストールできることを確認済み。
+  - `Share` / `Page` / `PushSubscription` / `ShareLoginAttempt` モデルを定義し `prisma migrate dev --name init` 実行、
+    `data/db.sqlite` に反映済み。
+  - Storage抽象化 (`src/lib/storage/types.ts`, `local-storage.ts`, `s3-storage.ts`, `index.ts`) を実装。
+    `STORAGE_DRIVER` 環境変数で local⇔s3(R2/Supabase Storage共用のS3互換アダプタ)を切替可能。
+    LocalStorageAdapterはパストラバーサル対策(resolveSafePath)込み。
+  - ID生成 (`src/lib/id/generate.ts`, nanoid 24文字) を実装。
+  - 一時スクリプトでDB作成→ストレージ書込→削除→レコード削除の一連の動作を確認後、スクリプトは削除。
+
+- **Step 2 完了(PDF→WebP変換パイプライン)**:
+  - 調査の結果、最新の `pdfjs-dist`(v5.6.205)は `@napi-rs/canvas` をoptionalDependencyとして正式サポート済みと判明。
+    独自の `NodeCanvasFactory` を書く必要はなく、`@napi-rs/canvas` の `createCanvas()` で生成したcanvasを
+    `page.render({ canvas, canvasContext, viewport })` にそのまま渡すだけで動作。
+  - さらに `@napi-rs/canvas` の `Canvas.toBuffer('image/webp', quality)` がネイティブWebPエンコードに対応していたため、
+    **sharpは変換パイプラインからは不要と判断し外した**(sharpはStep9のPWAアイコン生成でのみ使用する予定)。
+    これによりPNG中間生成→sharp再エンコードという二重圧縮を避け、依存も1つ減らせた。
+  - ハマった点: `cMapUrl`/`standardFontDataUrl` にWindowsの `\` 区切りパスを渡すと
+    `Invalid factory url: ... must include trailing slash` エラー。pdfjs内部ではURL文字列として扱われるため、
+    OSに関わらず `/` 区切り+末尾スラッシュに正規化する `toFactoryUrl()` を実装して解決。
+  - 動作確認: pdfkitで生成した3ページのテストPDF(28pt見出し〜9pt極小文字、罫線ボックス入り)を変換し、
+    1600x2263pxのWebP(各29KB程度)を目視確認。9pt文字も潰れず可読。変換時間は3ページで約1.15秒。
+  - 拡張子は`.pdf`だが中身がPDFでない偽ファイル("PK fake excel content..."というテキスト)を投入し、
+    `assertValidPdfUpload` がマジックバイト不一致で正しく拒否することを確認。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し。テスト用の一時スクリプト・出力は作業後に削除済み。
+
+- **Step 3 完了(管理者認証)**:
+  - `bcryptjs`(pure JS、Windowsネイティブビルド回避) + `jose`(HS256署名Cookie、Edge Runtime対応)を導入。
+  - `src/lib/auth/{password.ts, session-secret.ts, admin-session.ts, view-token.ts}`、
+    `src/lib/rate-limit/memory-rate-limiter.ts`、`src/lib/security/ip.ts`、`src/lib/csrf.ts` を実装。
+  - `/api/admin/login`(5回/15分のレート制限付き)、`/api/admin/logout`、`/admin/login` ログインフォーム、
+    `/admin/(dashboard)` 配下の認証済みレイアウト(route groupでlogin配下だけ除外)を実装。
+  - **ハマった点1**: Next.js 16.2.10では **`middleware.ts`の規約が非推奨化され`proxy.ts`に変更**されていた
+    (`export async function middleware` → `export async function proxy`、配置場所は`--src-dir`構成のため
+    プロジェクトルートではなく`src/proxy.ts`)。この命名変更に気づかず最初`/middleware.ts`をルート直下に置いたため
+    ミドルウェアが一切実行されず認証保護が機能しない不具合が発生 → `src/proxy.ts`にリネームして解決。
+  - **ハマった点2**: `.env`に貼り付けたbcryptハッシュ(`$2b$12$...`)がNext.jsの`dotenv-expand`による
+    変数展開($から始まる文字列を環境変数参照とみなす仕様)によって壊れ、正しいパスワードでもログインできない
+    不具合が発生 → `$`を`\$`にエスケープして解決。`.env`/`.env.example`にコメントで注意書きを追記済み。
+  - curlでの動作確認: 未ログイン時の`/admin`アクセスが`/admin/login`へ307リダイレクト、誤パスワードは401、
+    正パスワードでCookie発行後`/admin`が200、他オリジンからの状態変更リクエスト(Origin偽装)が403、
+    同一オリジンのログアウトは200、5回試行でレート制限(429)が発動、をすべて確認済み。
+  - `npx tsc --noEmit` / `npm run lint` エラー無し。確認後は開発サーバーを停止済み。
+
+- **Step 5+6 完了(共有ページ閲覧 + パスワード保護/ロックアウト)**:
+  - Step 5(閲覧画面)とStep 6(パスワード保護)は、既にDBスキーマ(`ShareLoginAttempt`)や
+    `view-token.ts`がStep 3の時点で用意済みだったため、手戻りを避けるため同時に実装した。
+  - `src/lib/share/lockout.ts`: `ShareLoginAttempt`テーブルを使ったDB永続化ロックアウトを実装。
+    5回失敗で5分ロック、以降失敗ごとに倍化(最大24時間)する指数バックオフ方式。
+    プロセス再起動をまたいで有効(インメモリのレート制限とは別に、こちらが本質的なブルートフォース対策)。
+  - `src/lib/auth/session-secret.ts`に`getSessionSecretString()`を追加し、IPハッシュ化(`hashIp`)で
+    SESSION_SECRETを生文字列として再利用できるようにした(既存の`getSessionSecretKey()`はこれをラップする形に整理)。
+  - `src/lib/share/expiry.ts`に`isShareExpired()`を追加。`status`フィールド(cronによる非同期更新、Step7で実装予定)と
+    `expiresAt`(即時判定)の両方をチェックすることで、cronが未実行の期限切れ共有にも即座にアクセスできないようにした。
+  - API: `POST /api/share/[shareId]/verify`(パスワード検証、インメモリレート制限+DBロックアウトの二重防御、
+    成功時にhttpOnly Cookie `view_token_{shareId}`を30日間有効で発行)、
+    `GET /api/share/[shareId]/pages/[n]`(画像バイナリ配信、パスワード付き共有は Cookie 検証必須、
+    `updatedAt`+ページ番号からETagを生成し304対応、Cache-Control: private, no-cache)。
+  - UI: `/share/[shareId]`(サーバーコンポーネント。共有が存在しない/期限切れなら`notFound()`、
+    パスワード必須かつ未認証ならパスワードフォーム、それ以外はビューアを表示)、
+    `PasswordForm`(クライアント、検証成功で`window.location.reload()`)、
+    `Viewer`(縦スクロールでページ一覧表示)、`ZoomableImage`(`react-zoom-pan-pinch`使用)。
+  - **設計判断**: ピンチズーム/ダブルタップズームと「複数ページの縦スクロール」を両立させるため、
+    各ページ画像を個別の`TransformWrapper`でラップし、`scale<=1`の間は`panning.disabled=true`にして
+    一本指の縦ドラッグをページの通常スクロールに委ねる方式を採用。ピンチ(2本指)とダブルタップは
+    scaleに関わらず常に有効なため、ズームイン操作自体は妨げられない。`onTransform`コールバックで
+    scaleを監視し、1.01を超えたら`zoomed=true`にしてpanningを有効化する。
+  - **ハマった点**: `react-zoom-pan-pinch`の型定義で、`onTransform`コールバックの第2引数は
+    `ReactZoomPanPinchState`(`previousScale`等を含むフル状態)ではなく、
+    `{ scale, positionX, positionY }`という簡略型だった。ライブラリの型エクスポート名と実際のコールバック
+    シグネチャが一致していなかったため、tscのエラーメッセージを頼りに実際の型に合わせて修正。
+  - next/imageではなく生の`<img>`を使用(ズームライブラリがDOM参照を直接操作するため)。
+    ESLintの`no-img-element`警告は理由をコメントで明記した上で該当行のみ無効化。
+  - 動作確認(一時スクリプト`scripts/test-create-share.ts`でPDF変換を経由せず、sharpでダミー画像の
+    共有を2件作成→curlで一連のAPIを検証→確認後スクリプトとテストデータは削除):
+    - パスワードなし共有: `/share/{id}`が200でビューアを直接表示、画像APIも200。
+    - パスワードあり共有: `/share/{id}`はパスワードフォームを表示(200)、認証前の画像APIは401。
+    - 誤パスワードは401、正パスワードは200+Set-Cookie、Cookie付きの画像取得は200。
+    - ETagを使った再検証で304が返ることを確認。
+    - 別の共有で誤パスワードを6回連続送信→5回目の失敗でロック、6回目以降は正しいパスワードでも429。
+    - 存在しない共有IDへのアクセスは404(カスタムnot-foundページ)。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し(imgタグの警告のみ、理由を明記して意図的に許容)。
+
+- **Step 7 完了(有効期限の自動削除)**:
+  - 有効期限の選択UI(アップロード時・設定変更時とも1日/7日/30日/無期限)自体はStep 4の時点で
+    実装済みだったため、今回追加したのは「期限が来たら実際に消す」バックエンド部分のみ。
+  - `node-cron` + `@types/node-cron` を導入。
+  - `src/lib/cron/cleanup-expired.ts`: `expiresAt <= 現在時刻` の共有を5分間隔で検索し、
+    ストレージ(画像一式)とDBレコードを完全削除する`cleanupExpiredShares()`を実装。
+    `Page`/`PushSubscription`/`ShareLoginAttempt`はPrismaスキーマの`onDelete: Cascade`で
+    連動削除されるため、`Share`を消すだけでよい。
+  - `src/instrumentation.ts`(Next.js標準の`register()`フック、App Router+src構成のため`src/`直下に配置)から
+    起動時にcronを登録。`NEXT_RUNTIME === "nodejs"`で分岐し、Edge Runtimeでは
+    (`better-sqlite3`やnode-cronが動かないため)登録しないようにした。
+  - Turbopackの開発時ホットリロードで`register()`が複数回呼ばれてもcronタスクが多重登録されないよう、
+    グローバル変数`__expiryCronStarted`でガードした(既存の`src/lib/prisma.ts`のグローバルキャッシュ
+    パターンを踏襲)。
+  - `Share.expiresAt`は既にビューア/画像配信APIの`isShareExpired()`で即時チェックされているため、
+    cronが5分間隔で走るまでの間も期限切れ共有への閲覧は防がれる(cronは実体の削除・クリーンアップ専任)。
+  - 動作確認: 一時スクリプトで「期限を1時間過去に設定した共有」と「1時間後が期限の共有」を作成し、
+    `cleanupExpiredShares()`を直接実行 → 期限切れの共有のみDBレコード・ストレージファイルとも削除され、
+    有効な共有は残ることを確認。開発サーバー再起動時に
+    `[cron] 期限切れ共有の自動削除ジョブを登録しました(*/5 * * * *)`のログも確認済み。
+    確認後、一時スクリプトと有効な方のテストデータは削除済み。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し。
+
+- **Step 8 完了(QRコード生成)**:
+  - `qrcode` + `@types/qrcode` を導入。
+  - `src/components/admin/qr-code-card.tsx`: クライアントコンポーネント。マウント時に
+    `QRCode.toDataURL(url, { width: 512, margin: 2, color: {...} })` でQRコードのdata URLを生成し
+    `<img>`で表示、「QRコードをPNG保存」ボタン押下で`<a download>`要素を動的生成してクリックしダウンロードさせる方式。
+  - 管理画面の共有詳細ページ(`src/app/admin/(dashboard)/[shareId]/page.tsx`)の「共有URL」カード内に、
+    URL表示・コピーボタンと並べて配置。
+  - **設計判断**: QR生成はサーバーコンポーネントでも(Node環境で`qrcode`はcanvas依存なしに動作するため)可能だが、
+    ダウンロード体験(Blob生成・`<a download>`のクリック)はクライアント側の処理が必要なため、
+    生成自体もクライアント側で行い実装を1コンポーネントに閉じた。
+  - 動作確認: 管理画面のログインパスワードを直接検証する代わりに、`createAdminSessionToken()`を
+    一時スクリプトから呼び出して有効なセッションCookieを直接発行し、curlで共有詳細ページ(200)と
+    「QRコードをPNG保存」ボタンの存在を確認(QR画像自体はクライアントJSで生成されるためcurlのHTMLには
+    現れない仕様上の制約があるため、これは別途下記で検証)。
+    QRコード生成ロジック自体は`qrcode`の`toBuffer`を使い同一パラメータでPNGファイルを直接出力し、
+    Readツールで画像として目視確認(3つの位置検出パターンを含む正常なQRコードであることを確認)。
+    確認後、一時スクリプトとテストデータは削除済み。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し。
+
+- **Step 9 完了(PWA対応)**:
+  - `@serwist/next` + `serwist`(+ peer依存の`@serwist/cli`)を導入。
+  - `scripts/generate-icons.ts`: 提供PNG(`ChatGPT Image 2026年7月6日 21_24_07.png`、1254x1254・不透明)から
+    `sharp`でicon-192/icon-512/icon-maskable-512(セーフゾーン確保のため80%に縮小し中央配置)/
+    apple-touch-icon(180x180、透過なし)を生成。iOSスプラッシュスクリーンも
+    主要12機種分(iPhone SE〜15/16、iPad各種)生成。生成物は`public/icons/`, `public/splash/`に配置し、
+    (next buildで自動生成されるsw.jsとは異なり)git管理下に置く。
+  - **設計判断**: iOSのapple-touch-startup-imageは「CSS論理px × デバイスピクセル比」の組み合わせでしか
+    マッチしないため、実ピクセルサイズだけでなく機種ごとのCSS論理サイズ・DPRも
+    `src/lib/pwa/splash-screens.ts`に一元管理する共有設定として切り出した。
+    `generate-icons.ts`(画像生成)と`layout.tsx`(`<link rel="apple-touch-startup-image">`生成)の
+    両方がこの1箇所を参照するため、サイズ定義の重複や食い違いが起きない。
+  - `src/app/manifest.ts`(Next.js標準の動的manifestファイル規約)でmanifest.webmanifestを生成。
+  - `src/app/sw.ts`: `defaultCache`(Next.js向けのHTML=NetworkFirst/静的アセット=CacheFirst相当の推奨設定)に加え、
+    共有ページの画像(`/api/share/*/pages/*`)には独自のStaleWhileRevalidateルールを先頭に追加し、
+    「オフライン時も最後に見た画像を表示する」要件を満たした。
+  - `src/app/layout.tsx`: manifestは自動リンクされるため、apple-touch-icon/apple-mobile-web-app-*系メタタグ・
+    theme-color(`viewport`エクスポート)・スプラッシュ`<link>`一式を追加。
+  - `src/components/share/install-prompt-button.tsx`: `beforeinstallprompt`をハンドリングし、
+    Android/Chrome等の対応環境でのみ「ホーム画面に追加」ボタンを表示(iOS Safariは同イベント非対応のため
+    非表示のまま、共有シートからの手動追加に委ねる)。共有ビューア画面に配置。
+  - **ハマった点1**: `sw.ts`はNode.js用ではなくService Worker用のグローバル型(`ServiceWorkerGlobalScope`等)
+    が必要だが、`/// <reference lib="webworker" />`をファイル先頭に足すと、プロジェクト全体のtscプログラムに
+    dom libとwebworker libが同時に読み込まれてグローバル型が衝突し、無関係な多数のクライアントコンポーネントで
+    `window`/`document`が見つからないエラーが大量発生した。最終的に、`sw.ts`自体には
+    `/// <reference lib="webworker" />` + `/// <reference no-default-lib="true" />`を残しつつ、
+    ルートの`tsconfig.json`の`exclude`に`src/app/sw.ts`を追加し、アプリ本体のtscプログラムから
+    完全に切り離すことで解決(Next.js/webpackのビルド自体はtsconfig.jsonのexclude設定と無関係にファイルを
+    処理するため、実際のビルドには影響しない)。
+  - **ハマった点2**: このプロジェクトはNext.js 16のデフォルトであるTurbopackを使用していたが、
+    `@serwist/next`は内部でwebpack専用のInjectManifestプラグインを利用しており、Turbopackとは非互換
+    (「webpack configとTurbopack configの両方は使えない」エラーでビルド自体が失敗)。
+    Serwist公式が提示する回避策に従い、`package.json`の`dev`/`build`スクリプトに`--webpack`フラグを追加し、
+    このプロジェクト全体をwebpackビルドに切り替えることで解決(`@serwist/turbopack`は実験的段階のため見送った)。
+  - **ハマった点3**: webpackへの切り替え後、`@napi-rs/canvas`のネイティブバイナリ(`.node`ファイル)を
+    webpackがJSとしてパースしようとして`Module parse failed`エラーになった
+    (Next.jsの標準の外部化対象リストに`@napi-rs/canvas`が含まれていなかったため)。
+    `next.config.ts`に`serverExternalPackages: ["@napi-rs/canvas"]`を追加し、
+    webpackにバンドルさせず実行時に`require`させることで解決。
+  - **ハマった点4**: `next build`で`public/sw.js`(圧縮済みの生成物)が新たに存在するようになった結果、
+    `npm run lint`がこの1行数万文字のファイルを解析しようとして大量の警告・エラーを出すようになった。
+    `eslint.config.mjs`の`globalIgnores`に`public/sw.js`を追加して解決。あわせて`.gitignore`にも
+    `/public/sw.js`(`next build`のたびに再生成されるビルド成果物のため)を追加した。
+  - **ハマった点5**: `appleWebApp.capable: true`はNext.jsのMetadata APIでは`apple-mobile-web-app-capable`
+    ではなく標準の`mobile-web-app-capable`タグしか出力しないと判明。旧バージョンのiOSとの互換性のため、
+    `metadata.other`で`apple-mobile-web-app-capable`を別途追加した(最初`other`に`mobile-web-app-capable`を
+    重複して指定してしまい、生成タグが重複していたのを修正)。
+  - 動作確認: `npm run build`(webpack)が成功し`public/sw.js`と`/manifest.webmanifest`が正しく生成されることを
+    curlで確認。さらに一時的に`playwright`をdevDependencyとして導入し、実際のヘッドレスChromiumで
+    (1)manifestが200・アイコン3件で取得できること、(2)Service Workerが登録されscriptURLが`/sw.js`で
+    `activated`状態になること、(3)共有ページの画像を開いた後、`caches`に`share-page-images`という名前の
+    キャッシュが作成され対象URLが保存されていること、(4)`context.setOffline(true)`でオフラインにして
+    リロードしても画像の`naturalWidth`が引き続き800(正常にロード済み)であること、(5)コンソールエラーが
+    無いこと、を全て確認。確認後、`playwright`はアプリの永続的な依存ではないため`npm uninstall`で削除し、
+    一時スクリプト・テストデータ・スクリーンショットも削除済み。
+    `npx tsc --noEmit` / `npm run lint` ともにエラー無し(webpackモードのdevサーバーでの動作も確認済み)。
+
+## 2026-07-07
+
+- **Step 10 完了(Push通知)**:
+  - `web-push` + `@types/web-push` を導入。`scripts/generate-vapid-keys.ts`(`webpush.generateVAPIDKeys()`を
+    実行し標準出力にVAPID_PUBLIC_KEY/VAPID_PRIVATE_KEYを表示するだけのCLI)を作成し、実際に鍵を生成して
+    `.env`のVAPID_PUBLIC_KEY/VAPID_PRIVATE_KEYに設定した(VAPID_SUBJECT_EMAILは`.env.example`の
+    ダミー値のまま。本番投入時は実メールアドレスに差し替えが必要)。
+  - `src/lib/push/web-push-client.ts`: `sendPush()`が`web-push`の`sendNotification`をラップし、
+    宛先が410 Gone/404 Not Found(ブラウザ側で購読が破棄済み)の場合は`shouldRemove: true`を返す。
+    呼び出し側(通知送信API)はこれを見てDBの該当`PushSubscription`を削除する。
+  - `src/lib/share/access.ts`: 新規追加。パスワード付き共有のview_token検証を
+    (`share/[shareId]/page.tsx`や`pages/[n]/route.ts`に既にあった同種のチェックを3箇所目として
+    複製するのではなく)`isViewerAuthorized()`として切り出し、新設の購読APIから利用。
+    既存の2箇所は動作実績があるため今回は触れず、新規コードのみこのヘルパーを使う方針とした。
+  - API: `GET /api/push/vapid-public-key`(公開鍵をJSONで返すだけ)、
+    `POST/DELETE /api/share/[shareId]/subscribe`(パスワード付き共有は`isViewerAuthorized`必須、
+    購読はendpointをユニークキーとしてupsert、解除はshareId+endpointで削除)、
+    `POST /api/admin/shares/[shareId]/notify`(該当shareIdの全購読へ`web-push`で並列送信し、
+    無効化された宛先をまとめてDB削除、`{ok, sent, total}`を返す。管理API配下のため`proxy.ts`の
+    既存の管理者認証チェックがそのまま効く)。
+  - UI: `src/components/share/push-subscribe-button.tsx`(購読/解除トグルボタン。
+    Service Worker/PushManager非対応環境や通知が拒否済みの環境では非表示/理由表示にフォールバック)を
+    `Viewer`に追加。管理側は`src/components/admin/notify-form.tsx`(任意メッセージ入力+送信ボタン、
+    送信件数を表示)を共有詳細ページに追加。
+  - `src/app/sw.ts`に`push`イベント(`showNotification`でOS通知表示、アイコンは`/icons/icon-192.png`を流用)と
+    `notificationclick`イベント(該当URLを開いているタブがあればフォーカス、無ければ新規タブで開く)の
+    リスナーを追加(Serwistの`addEventListeners()`とは別に自前で追加。Serwist自体はキャッシュ戦略のみ担当)。
+  - **ハマった点1**: `applicationServerKey`にURLセーフBase64をデコードした`Uint8Array`を渡す際、
+    最近のTypeScript DOM libでは`Uint8Array<ArrayBufferLike>`が`PushSubscriptionOptionsInit`の
+    要求する`BufferSource`(内部的に`ArrayBuffer`前提)と型不一致でコンパイルエラーになった。
+    実行時には問題ない型の狭さの問題のため、`as BufferSource`で明示キャストして解決。
+  - **ハマった点2(検証時)**: tsxの内部処理(esbuildのkeepNames機能)が、`page.evaluate()`に渡す
+    コールバック内で名前付き関数(`const f = (x) => ...`等)を使うと`__name(f, "f")`という補助呼び出しを
+    注入するが、Playwrightはコールバックを`toString()`で文字列化してブラウザ側に送るため、
+    その補助関数の定義自体は送られず`ReferenceError: __name is not defined`になった。
+    コールバック内では名前付きの関数/定数関数を作らず、無名関数のIIFEで書くことで回避。
+  - **ハマった点3(検証時)**: ヘッドレスChromiumでは`navigator.permissions.query()`は`granted`を返すのに
+    レガシーな`Notification.permission`は常に`denied`を返し、`pushManager.subscribe()`も
+    実際に`AbortError: Registration failed - permission denied`で失敗するという既知の制限があった。
+    さらに(ヘッドレスかどうかに関わらず)Chromeは仕様上シークレットモード相当のコンテキストでは
+    Push APIを一切サポートしない(https://crbug.com/41124656)ため、通常の`browser.newContext()`
+    (内部的にシークレット相当)でも同じ理由で失敗していた。最終的に
+    `chromium.launchPersistentContext(tmpDir, { headless: false })`で永続プロファイルを使い、
+    実際のブラウザウィンドウ(このマシンはWindowsデスクトップのため`headless:false`が起動可能、
+    Bashツールの通常のサンドボックスではGUIプロセスの起動が制限されるため`dangerouslyDisableSandbox: true`が必要)
+    で検証することで解決した。
+  - 動作確認(一時スクリプトで検証、確認後すべて削除・Playwrightもuninstall済み):
+    - 一時的に`playwright`をdevDependencyとして導入し、上記の永続プロファイル+`headless:false`構成で、
+      実際に「更新通知を受け取る」ボタンをクリック→ブラウザの通知許可ダイアログ相当(CDP経由で許可済み)→
+      `pushManager.subscribe()`が実際にGoogleのプッシュサービスと通信して本物の購読を作成→
+      `/api/share/[shareId]/subscribe`へPOSTされDBに保存されることを確認。
+    - 管理画面の`createAdminSessionToken()`で発行したCookieを使い`/api/admin/shares/[shareId]/notify`を
+      実際に呼び出し、`web-push`経由で実際にGoogleのプッシュサービスへ配信 → Service Workerの`push`
+      イベントが発火し`showNotification`で実際のOS通知が表示され、`registration.getNotifications()`で
+      期待通りのタイトル・本文であることを確認。
+    - 購読のendpointを実在しない値に書き換えてから再度通知を送信し、410/404相当のエラーで
+      DBの`PushSubscription`が自動削除されることを確認。
+    - 「更新通知をオフにする」ボタンのクリックで`pushManager`の購読解除とDB側の削除が両方行われることを確認。
+    - パスワード付き共有への`view_token`無し購読が401、存在しない共有への購読が404になることをcurlで確認。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の一時共有データ・一時スクリプト・
+    Playwright(パッケージ本体、devDependency)は作業後にすべて削除・アンインストール済み。開発/本番サーバーも停止済み。
+
+- **Step 11 完了(セキュリティ仕上げ)**:
+  - `src/proxy.ts`にCSP(Content-Security-Policy)をNext.js公式のnonceベース方式で追加。
+    リクエストごとに`crypto.randomUUID()`からnonceを生成し、`x-nonce`リクエストヘッダーとCSPレスポンス
+    ヘッダー両方に設定。`script-src 'self' 'nonce-xxx' 'strict-dynamic'`、`style-src 'self' 'unsafe-inline'`
+    (インラインstyle属性/dangerouslySetInnerHTMLは未使用と確認済みだがTailwind外の保険)、
+    `img-src 'self' data: blob:`(管理画面のQRコードdata URL用)、`frame-ancestors 'none'`、
+    `object-src 'none'`、`base-uri 'self'`、`form-action 'self'`等を設定。
+    あわせて`X-Frame-Options: DENY`、`Permissions-Policy`(camera/microphone/geolocation等を無効化)、
+    本番のみ`Strict-Transport-Security`、`/admin`・`/api/admin`配下に`Cache-Control: no-store`を追加。
+    `next.config.ts`に`poweredByHeader: false`も追加(X-Powered-By除去)。
+  - `src/app/robots.ts`を追加(Next.jsの動的robotsルート規約)。社内限定サービスのため全面Disallow。
+  - `src/lib/push/validate-endpoint.ts`: Push購読のendpointが`https://`かつプライベート/ローカルホスト
+    (127.*, 10.*, 192.168.*, 172.16-31.*, 169.254.*, localhost, ::1, fc00::/7, fe80::/10等)でないことを
+    検証する`assertValidPushEndpoint()`を追加。管理者が「通知送信」を押した際にサーバーが
+    endpointへ直接HTTPリクエストを送る(web-pushの仕組み上必須)ため、これを検証しないと
+    悪意ある購読リクエストで内部ネットワーク宛のSSRFの踏み台にされ得た。
+    `POST /api/share/[shareId]/subscribe`に組み込み、あわせて`consumeRateLimit`で
+    IPごと5分20回のレート制限も追加(購読エンドポイントへの大量登録によるDB肥大化・スパム対策)。
+  - **重大な不具合とその発見・修正**: CSPを追加した直後、Playwrightで実ブラウザ検証したところ
+    **サイト全体が機能停止する**不具合を発見した(`npm run lint`/`tsc`は当然パスするが、
+    実際にブラウザで開くとNext.js自身のコアバンドル(webpack.js/main-app.js/各ページのJS)と
+    インラインスクリプトが軒並みCSP違反でブロックされ、Reactのハイドレーション自体が
+    一切実行されない状態だった)。原因はNext.js App RouterのnonceベースCSPの「自動付与」が、
+    ルートレイアウト(またはその配下)のどこかで`headers()`を呼び出して初めて有効化される仕組み
+    だったため(呼ばない場合、Next.jsはCSPが適用されていることを検知できず、nonce無しで
+    スクリプトタグを出力してしまう)。`src/app/layout.tsx`の`RootLayout`を`async`にし、
+    値は使わないものの`await headers()`を呼ぶことで解決。これにより`/`・`/admin/login`・
+    `/manifest.webmanifest`は静的プリレンダー(○)から動的レンダリング(ƒ)に変わったが、
+    全ページで確実にCSPが機能する方を優先した。
+    (この不具合はcurlでのヘッダー存在チェックだけでは絶対に気づけず、実ブラウザでのコンソール
+    エラー確認によって初めて発見できた。ヘッダーが正しく出力されていること自体は無罪だが、
+    「ページが実際に動くか」を見ないと機能停止に気づけない典型例だった)。
+  - 動作確認(一時的にPlaywrightを再導入し、確認後アンインストール):
+    - 管理ログイン・管理ダッシュボード・管理共有詳細・共有ビューアの4ページすべてで
+      CSP違反エラー・pageerrorがゼロで、Service Workerも正常に`activated`まで到達することを確認。
+    - Step10で構築したPush通知の実フロー(実ブラウザでの購読ボタン操作→本物のGoogleプッシュ
+      サービス経由での通知送信→OS通知表示)がCSP適用後も引き続き正常動作することを再確認。
+    - `curl`で各ページのレスポンスヘッダーを確認: CSP/Permissions-Policy/HSTS(本番相当)/
+      X-Frame-Options/Referrer-Policy/X-Content-Type-Optionsが期待通り出力され、
+      `/admin/login`と`/admin`(未認証時)に`Cache-Control: no-store`が付与されることを確認。
+      `/robots.txt`が`Disallow: /`を返すことを確認。
+    - Push購読APIに対し、`http://`スキームのendpointと内部IP(169.254.169.254)宛のendpointが
+      ともに400で拒否され、正当な`https://fcm.googleapis.com/...`形式のendpointは200になることを確認。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の一時共有データ・一時スクリプト・
+    Playwrightは作業後にすべて削除・アンインストール済み。本番サーバーも停止済み。
+
+- **Step 12 完了(UI仕上げ + README作成)— 全13ステップ完了**:
+  - UIのデザイントークン(角丸`rounded-2xl/3xl`、控えめな影、SF系フォントスタック、
+    アクセントカラー`#ff3b30`、`foreground/NN`による階調のグレー)自体はStep 3〜9の各画面実装時点で
+    既に一貫して適用されていたため、今回はゼロから作り直す必要はなく、残っていた粗を仕上げる形にした。
+    実際にPlaywrightでスクリーンショットを撮って確認したところ、管理ログイン・ダッシュボード・
+    共有詳細・閲覧ページとも既に統一感のあるミニマルな見た目になっていた。
+  - `src/app/favicon.ico`がcreate-next-appのデフォルト(Next.jsロゴ)のままだった不具合を修正。
+    `scripts/generate-icons.ts`に`generateFavicon()`を追加し、提供PNGから16/32/48pxの
+    PNGフレームを生成して自前の最小限のICOコンテナ(ヘッダー+ディレクトリエントリ+PNGデータを
+    手動でBuffer結合)に格納する方式にした(ico変換用の追加npm依存を増やさないため。
+    Windows Vista以降・主要ブラウザはICO内のPNG圧縮フレームに対応している)。
+    生成後、48pxフレームを別途PNGとして書き出しReadツールで目視し、アプリ本来のアイコンで
+    あることを確認。
+  - `src/components/ui/button.tsx`に`size`プロパティ(`"md"`(既定)/`"sm"`)を追加し、
+    従来5箇所(ログアウト・URLコピー・削除系3ボタン・PDF差し替え)で使われていた
+    `className="!px-4 !py-2 text-sm"`という`!important`上書きのハックを`size="sm"`に置き換えて解消。
+    余白のトークン化(このステップの目的そのもの)として、サイズ違いのボタンをコンポーネントの
+    バリエーションとして正式に管理する形にした。
+  - `src/app/not-found.tsx`(ルート直下のNext.js標準404規約)を追加。従来は`share/[shareId]`配下にのみ
+    カスタム404があり、それ以外の不正なURL(例: `/foo`)はNext.jsの無地なデフォルト404が出てしまい
+    デザインの一貫性が崩れていたため、同じトーン(見出し+説明文+管理画面へのリンク)で統一した。
+  - README.mdをcreate-next-appのデフォルト内容から全面的に書き直し。サービス概要・主な機能・
+    技術スタック・環境変数のセットアップ手順(管理者パスワードハッシュ生成・SESSION_SECRET生成・
+    VAPID鍵生成のコマンド、`$`エスケープの注意点を含む)・開発/本番起動コマンド・
+    ディレクトリ構成概要・ストレージ/DBの将来的な移行方法・セキュリティ概要・既知の制限事項を記載した。
+  - 動作確認: `npm run build`(webpack)成功を確認後、一時的にPlaywrightを再導入し、
+    管理ログイン・管理ダッシュボード・共有詳細(QRコード+更新通知フォーム)・共有ビューア・
+    新設の404ページの5画面をスクリーンショットで目視確認(すべて意図通りのレイアウト・配色で
+    表示され、崩れや意図しない要素は無し)。確認後、テスト用共有データ・スクリーンショット・
+    一時スクリプト・Playwrightは削除・アンインストール済み。開発/本番サーバーも停止済み。
+  - `npx tsc --noEmit` / `npm run lint` ともにエラー無し。`git status`もクリーン(想定外の
+    追跡外ファイル無し)。
+
+  --- ここまでで実装計画(`concurrent-launching-plum.md`)の全13ステップが完了 ---
+
+### 実運用開始後に発覚した不具合対応(2026-07-07)
+
+ユーザーが実際に管理者パスワードを設定して`npm run dev`で使い始めたところ、Step 11のCSP導入時の
+検証(本番ビルド`npm run start`でのみ実施)では気づけなかった、開発モード(`npm run dev`)特有の
+不具合が2件発覚した。
+
+- **不具合1: ログインボタンが押せない(実際は画面全体が無反応)**:
+  ユーザーからブラウザのConsoleスクリーンショットの共有を受け、原因を特定。
+  `Uncaught EvalError: ... 'unsafe-eval' is not an allowed source of script`が
+  `next/dist/compiled/@next/react-refresh-utils/dist/runtime.js`から発生していた。
+  Next.jsの開発時Fast Refresh(コード変更のホットリロード)は内部で`eval()`を使うため、
+  Step11で追加したCSPの`script-src`に`'unsafe-eval'`が無いと**開発モードのJS実行が丸ごと止まる**
+  (ボタンが押せないどころか、あらゆるクライアント側の動作が停止する)。本番ビルドでは
+  Fast Refreshが存在しないため元々問題なかったが、本番ビルドでしか検証していなかったため
+  この開発モード特有の不具合を見逃していた。`src/proxy.ts`の`buildCsp()`で
+  `process.env.NODE_ENV === "production"`のときのみ`'unsafe-eval'`を外し、開発時は許可する形に修正。
+
+- **不具合2: PDFアップロードが500エラーで失敗**:
+  ユーザーから実際のアップロードエラーのスクリーンショット(`POST /api/admin/shares 500`)の共有を受け、
+  開発サーバーのログで`TypeError: Object.defineProperty called on non-object`
+  (`src/lib/pdf/convert.ts:48`、`await import("pdfjs-dist/legacy/build/pdf.mjs")`の行)を確認。
+  原因はStep9で`next dev`/`next build`をTurbopackからwebpackへ切り替えて以降、
+  `pdfjs-dist`が`next.config.ts`の`serverExternalPackages`に含まれておらず、webpackが
+  bundleしようとしていたこと。`pdfjs-dist`のlegacyビルドは`globalThis`への独自polyfillパッチを
+  素のESM実行前提で行っており、webpackでバンドルされると(`@napi-rs/canvas`のネイティブバイナリと
+  同様に)内部の`Object.defineProperty`呼び出しが対象を見失い実行時エラーになっていたと判明。
+  `next.config.ts`の`serverExternalPackages`に`"pdfjs-dist"`を追加し解決。
+  **重要な教訓**: Step9でTurbopack→webpackへの切替を行って以降、実際のPDFアップロード
+  (pdfjs-distを経由する本物の変換パイプライン)を一度も再検証していなかった
+  (Step4以降の検証はすべて`storage.put`で直接WebPを書き込むバイパス方式を使っており、
+  本物のPDF→WebP変換ルートを一切通していなかった)。ビルドツールを切り替えるような変更の後は、
+  ショートカットで検証していた経路についても実際のエンドツーエンドフローを一度は通す必要がある。
+  修正後、pdfkitで生成した実際のPDF(英文テキスト+罫線)を管理者APIへ本物のmultipart
+  アップロードとして送信し、変換されたWebP画像をダウンロードして目視で正しく描画されている
+  ことを確認した(最初pdfkitのデフォルトフォントで日本語を書いたところ文字化けしたが、これは
+  pdfkit側がCJKフォント未登録だったための一時スクリプトの問題であり、実際の変換パイプライン
+  自体の不具合ではないと切り分け済み)。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。検証用の一時PDF・共有データ・一時スクリプト・
+  pdfkit(devDependency)は作業後にすべて削除・アンインストール済み。
+
+### 機能追加: 複数PDFを1つの共有にまとめる(2026-07-07)
+
+ユーザーから「複数の共有を1つのURLで見たい」との要望。選択肢(アップロード時に複数PDFをまとめる/
+既存の共有を後からグループ化する/PDFを外部で結合してからアップロード)を提示したところ、
+「アップロード時に複数PDFをまとめる」を選択。
+
+- `src/lib/pdf/convert.ts`に`convertPdfsToWebpPages(buffers: Buffer[])`を追加。既存の
+  単一ファイル変換関数`convertPdfToWebpPages`はそのまま(1ファイルずつ)使い、結果を結合して
+  ページ番号を通し番号(1ファイル目→2ファイル目→…)に振り直すだけの薄いラッパーにした
+  (よく検証済みの単一ファイル変換ロジックには手を入れないことでリスクを抑えた)。
+  合計ページ数がMAX_PDF_PAGES(50)を超える場合はエラーにする。
+- `POST /api/admin/shares`(新規作成)・`PATCH /api/admin/shares/[shareId]`(PDF差し替え)の
+  両方を、単一の`file`フィールドではなく複数エントリの`files`フィールド(`formData.getAll("files")`)を
+  受け取る形に変更。各ファイルを個別にマジックバイト検証した上で`convertPdfsToWebpPages`に渡す。
+  `originalFilename`は全ファイル名をカンマ区切りで結合して保存(500文字で切り詰め)。
+- `src/components/admin/upload-dropzone.tsx`: `<input type="file" multiple>`に変更し、
+  ドラッグ&ドロップ・クリック選択のどちらでも複数ファイルを選べるようにした。選択したファイルは
+  順番付きリストで表示し、個別に✕ボタンで解除可能。ドロップゾーンは選択後もクリック可能なままにし、
+  複数回に分けて追加できるようにした。
+  `src/components/admin/replace-pdf-form.tsx`も同様に複数ファイル対応にした(PDF差し替え時も
+  複数ファイルをまとめて1つの共有に反映できるように、作成時との一貫性を優先)。
+- 動作確認: `pdfkit`を一時導入し、2ページのPDF(Document A)と1ページのPDF(Document B)を生成、
+  実際に管理者APIへ2ファイルまとめてmultipartアップロードし、生成された共有が
+  合計3ページ(A-1, A-2, B-1の順)になっていることをDBと画像の両方(ダウンロードして目視)で確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の共有データ・一時PDF・一時スクリプト・
+  pdfkitは作業後にすべて削除・アンインストール済み。
+
+### 機能追加: 既存の複数共有をグリッド一覧で見せる「コレクション」(2026-07-07)
+
+前述の「複数PDFを1つの共有にまとめる」機能を実装した後、ユーザーから「別々に共有したものも
+まとめたい」との追加要望。最初はPDFページ結合の延長线だと思い込み確認したところ、実際は
+「テスト画像」「テスト2」のようにPDFの中身自体を結合したいのではなく、
+**既存の複数の共有(それぞれ独立したURL)を1つのURLで並べて見せ、選ぶとその共有を開ける**
+という別機能(ギャラリー/インデックスページ)が欲しいという話だと判明。AskUserQuestionで
+「呼び方(グループ/コレクション/まとめ)」→「コレクション」、「一覧ページ自体にパスワード保護を
+付けるか」→「付けない(常に誰でも一覧は見られる、個別共有側のパスワードはそのまま効く)」を確認して実装。
+
+- **スキーマ追加**: `Collection`(id, title, createdAt, updatedAt)と`CollectionItem`
+  (collectionId, shareId, order の中間テーブル、shareへの参照は`onDelete: Cascade`)を追加。
+  `prisma migrate dev --name add_collections`で反映。
+  **ハマった点**: マイグレーション後、起動済みのdevサーバー(`npm run dev`)が持っていた
+  古いPrismaClientインスタンス(`src/lib/prisma.ts`のグローバルキャッシュ)が新モデルを
+  認識できず`Cannot read properties of undefined (reading 'create')`で失敗した。
+  `npx prisma generate`でクライアントコード自体は再生成されていたが、既に起動していた
+  Node.jsプロセスの評価済みモジュールキャッシュまでは更新されないため、devサーバーの
+  再起動が必要だった(スキーマ変更・マイグレーション後は必ずdevサーバー再起動が要る、と
+  今後も覚えておく)。
+- **API**: `POST /api/admin/collections`(2件以上のshareIdからコレクション作成)、
+  `PATCH /api/admin/collections/[id]`(タイトル変更・所属共有の全置換)、
+  `DELETE /api/admin/collections/[id]`(コレクションのみ削除、中の共有自体は削除されない設計)。
+- **管理画面**: ダッシュボードに「コレクション」カード(タイトル入力+全共有のチェックボックスから
+  2件以上選んで作成)と「コレクション一覧」セクションを追加。
+  `/admin/collections/[id]`に詳細ページ(URL・QRコード・所属共有の編集フォーム・削除ボタン)を追加。
+  チェックボックスリストは`ShareCheckboxList`として共通化し、作成フォーム・編集フォーム両方で使い回した。
+- **公開ページ**: `/collection/[id]`(パスワード保護なし、常に閲覧可能)。グリッド(2列/sm以上3列)で
+  各共有を「サムネイル(1ページ目の画像)+タイトル+更新日」のカードとして表示し、
+  クリックで`/share/[shareId]`(既存の個別ビューア)へ遷移する。パスワード付きの共有は
+  サムネイル画像を読み込もうとすると401になり壊れて見えるため、代わりに🔒アイコンのプレースホルダーを
+  表示する(実画像を試みない)。期限切れの共有は一覧から即座に除外(`isShareExpired`を再利用)。
+  **ハマった点**: 期限判定を`Date.now()`を使ってpage.tsx内に直接インラインで書いたところ、
+  ESLintの`react-hooks/purity`ルール(Server Componentのレンダー中に不純な関数呼び出しを禁じる)に
+  引っかかった。既存の`src/lib/share/expiry.ts`の`isShareExpired()`ヘルパー(共有ページ側で
+  既に同じ判定に使われている)を再利用することで解消(コードの重複も避けられ一石二鳥)。
+- 動作確認: パスワード無しの共有1件・パスワード付きの共有1件を作成し、両方を含むコレクションを
+  API経由で作成。公開ページで(1)コレクションタイトル・件数が正しく表示、(2)パスワード無し共有は
+  実際のサムネイル画像が表示、(3)パスワード付き共有は🔒アイコンが表示、(4)各カードが正しい
+  `/share/[shareId]`へリンクしていることをPlaywrightのスクリーンショットで目視確認。
+  管理画面側でもダッシュボードのコレクション作成フォーム・一覧・詳細ページ(URL/QR/編集フォーム)を
+  スクリーンショットで確認。最後にコレクションを削除し、**中の共有2件は削除されず200のまま残る**
+  (コレクション自体は404になる)ことを確認し、削除がコレクション単位に留まり共有を巻き込まないことを検証。
+  (検証中、curlコマンドの引数に直接日本語リテラルを書いたテストデータのタイトルが文字化けする現象に
+  遭遇したが、これはこのWindows/Git-Bash環境でシェル引数に日本語を渡す際のエンコーディングの問題であり、
+  アプリ側の不具合ではないと切り分け済み。実際のブラウザ操作やtsxスクリプト経由の日本語は正しく保存・
+  表示されることを別途確認済み)。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の共有・コレクション・スクリーンショット・
+  一時スクリプト・Playwrightは作業後にすべて削除・アンインストール済み。
+
+### 機能追加: コレクションの「全共有自動反映」モード + 共有画面からのログイン導線(2026-07-07)
+
+ユーザーから2点の追加要望。(1)「全部一つに自動でまとめられるようにしたい」→
+AskUserQuestionで「毎回チェックし直す手間を無くしたい」という意図を確認し、
+「常に全共有を自動反映する特別なコレクション」を選択。(2)「共有画面からログインに遷移できるようにしたい」。
+
+- **自動反映コレクション**: `Collection`モデルに`autoIncludeAll Boolean @default(false)`を追加
+  (`prisma migrate dev --name collection_auto_include_all`)。trueの場合、`CollectionItem`による
+  手動選択を一切無視し、公開ページ側で`prisma.share.findMany()`によりその時点の全共有を動的に
+  取得して表示する(今後アップロードする共有も、コレクションを一切編集せず自動的に反映される)。
+  作成フォーム・編集フォーム双方に「すべての共有を自動的に含める」チェックボックスを追加し、
+  オンの間は手動選択チェックボックス一覧を非表示にする。管理画面の一覧には「自動」バッジを表示。
+  **ハマった点(2回目)**: 前回のコレクション機能追加時と全く同じ理由で、マイグレーション後に
+  起動済みのdevサーバーが古いPrismaClientを握ったままで`autoIncludeAll`プロパティが型に無いと
+  tscエラーになった。今回は`npx prisma generate`を明示的に再実行しdevサーバーも再起動して解決。
+  スキーマ変更時は「migrate dev」だけに頼らず、必ず`prisma generate`の反映確認とdevサーバー
+  再起動をセットで行う、と再確認した。
+- **共有画面→管理画面への導線**: `src/components/share/viewer.tsx`(通常の閲覧画面)と
+  `src/components/share/password-form.tsx`(パスワード入力画面)、`/collection/[id]`ページの
+  それぞれ末尾に、控えめな(`text-xs text-foreground/40`)「管理者の方はこちら」リンクを追加し
+  `/admin`へ遷移できるようにした(未ログインなら`/admin/login`に自動リダイレクトされる)。
+- 動作確認: `autoIncludeAll: true`のコレクションをAPI経由で作成 → 既存の実データ(「テスト画像」
+  「テスト2」)が両方とも自動的に一覧に出ることを確認 → その後新しい共有を1件作成し、
+  コレクションを一切編集せずに再読み込みしただけで新しい共有も自動的に追加表示されることを確認。
+  Playwrightで管理画面の新チェックボックスUIと、閲覧画面末尾の「管理者の方はこちら」リンクの
+  見た目もスクリーンショットで確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の共有・コレクション・一時スクリプト・
+  Playwrightは作業後にすべて削除・アンインストール済み。
+
+### 不具合修正: 実際のWord印刷PDFでアップロードが失敗する(2026-07-07)
+
+ユーザーから「またアップロードに失敗します」と報告。ブラウザのエラースタックだけでは
+原因特定に至らず、実際に失敗したPDFファイルの場所を聞いたところ
+`C:\Users\PC_User\Pictures\Screenshots\text.pdf`(Word印刷で作成)と判明。
+このファイルを直接`convertPdfToWebpPages`にかけて再現に成功した。
+
+- **エラー内容**: `Error: Value is none of these types \`String\`, \`Path\`,`(`code: 'InvalidArg'`)が
+  pdfjs-distの`CanvasGraphics.paintChar`(`ctx.fill(path)`)で発生。
+- **原因調査**: pdfjs-dist(legacyビルド)はNode環境で動作する際、`globalThis.Path2D`/
+  `DOMMatrix`/`ImageData`が未設定なら`@napi-rs/canvas`から自動でポリフィルする処理を持つ
+  (`pdf.mjs`内、`createRequire(import.meta.url)`経由の内部require)。ところがこの内部requireが、
+  このアプリの`src/lib/pdf/convert.ts`が`import`している`@napi-rs/canvas`とは**別インスタンス**を
+  読み込んでしまうことがあり(実際に`globalThis.Path2D !== 自分がimportしたPath2D`であることを
+  診断スクリプトで確認)、埋め込みフォント(Word/Excel印刷PDFで一般的)のグリフを
+  Path2Dベースで描画する際、pdfjs側が生成したPath2Dインスタンスと、こちらが
+  `createCanvas()`したcontextのネイティブ実装が別クラス扱いになり、N-APIの型チェックで
+  弾かれていた。標準14フォント(pdfkitのデフォルト等)はネイティブ`fillText`の別経路を通るため
+  この問題を踏まず、これまでの一時的な動作確認(Step2、Step10〜12の各確認)ではたまたま
+  再現しなかった。
+- **修正**: `src/lib/pdf/convert.ts`の先頭で、pdfjs-distをdynamic importする前に
+  自分がimportした`Path2D`/`DOMMatrix`/`ImageData`を`globalThis`へ`??=`で先回り設定するように
+  変更。pdfjs-dist側のポリフィルは「まだ設定されていなければ」のみ行うため、
+  常にこちらのインスタンスが使われるようになる。
+  **ハマった点**: 修正を`npm run dev`のプロセスに反映させた直後も失敗が再現した。
+  原因は、修正前のコードで実行された過去の失敗リクエストによって、その時点の
+  (誤った別インスタンスの)`globalThis.Path2D`が**プロセスの生存期間中ずっと**設定されたままに
+  なっており、`??=`ガードのため修正後のコードもそれを見て「既に設定済み」と判断し
+  上書きしなかったため。devサーバーを再起動(=プロセスを作り直す)ことで解決した。
+  今後同様の「globalThis状態の汚染」が疑われる場合は、コード修正後の一度のリクエストだけでなく
+  プロセスの再起動有無も確認すること。
+- 動作確認: 実際に失敗した`text.pdf`を直接`convertPdfToWebpPages`にかけて成功を確認、
+  出力画像を目視して日本語embeddedフォントのテキストが正しく描画されていることを確認。
+  さらに開発サーバー再起動後、実際の管理者APIへ本物のmultipartアップロードとして
+  同じファイルを送信し、201で共有が作成され配信された画像も正しいことを確認。
+  `npm run build`(本番ビルド)も問題なく成功することを確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の共有・一時スクリプトは
+  作業後にすべて削除済み(`text.pdf`自体はユーザー作成のテストファイルのため削除せず残した)。
+
+### 機能変更: トップURLで全共有一覧をデフォルト表示(2026-07-07)
+
+前述の「自動反映コレクション」をユーザー用に1つ作成して案内したところ、
+「デフォルトでそうしてほしい」との要望。AskUserQuestionで意図を確認したところ、
+「サイトのトップURL(ドメイン直下)に誰かがアクセスしたら、この全共有まとめグリッドを
+直接見せたい」という意味だと判明(=社内の全共有一覧が誰でも見える状態になる、という
+セキュリティ上の影響込みで明示的に合意を得た)。
+
+- 従来`src/app/page.tsx`は`redirect("/admin")`のみだったが、これを廃止し、
+  全共有(期限切れ除く)をグリッド表示する内容に置き換えた。特定の`Collection`レコードに
+  依存させると「そのレコードが消えたらトップページも壊れる」という脆さがあるため、
+  `Collection.autoIncludeAll`とは独立に、トップページ自身が直接`prisma.share.findMany()`で
+  全共有を都度取得する設計にした(前回ユーザー用に作った専用コレクションと同じ内容を
+  重複して持つことになるが、より堅牢な設計を優先)。
+  末尾に「管理者の方はこちら」リンクを設置し、`/admin`への導線は維持した。
+- グリッド描画(サムネイル+タイトル+更新日、パスワード付きは🔒表示)のJSXを
+  `src/components/collection/share-grid.tsx`の`ShareGrid`コンポーネントとして切り出し、
+  トップページと`/collection/[id]`ページの両方から共通で使うようにした(重複コード解消)。
+  **副次的な効果**: 従来`start_url: "/"`のPWAマニフェスト設定により、閲覧者(共有ページで
+  「ホーム画面に追加」した一般ユーザー)がインストール済みPWAをホーム画面から起動すると
+  意図せず管理者ログイン画面にリダイレクトされてしまう、という潜在的な導線の不具合が
+  副次的に解消された(トップページが実用的な全共有一覧になったため)。
+- 動作確認: `curl`でトップページ(`/`)が200を返し、既存の全共有(3件、実際のWord印刷PDFの
+  サムネイル含む)へのリンクと`/admin`へのリンクが正しく含まれることを確認。Playwrightで
+  スクリーンショットを撮り、実際のサムネイル画像・タイトル・更新日が正しく表示されている
+  ことを目視確認。`npm run build`(本番ビルド)も成功することを確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。
+
+### 機能追加: 一覧のその場プレビュー化・正方形グリッド・タップ有効化ズーム・ログインボタン移動(2026-07-07)
+
+ユーザーから4点まとめての要望を受け、今回は`/plan`モードを使い、Explore→Plan(設計)の
+2段階のsubagentを経てから実装した。設計段階で4つの決定ポイント(パスワード付き共有の扱い、
+タップ有効化の適用範囲、ログインボタンの適用範囲、サムネイル比率)をAskUserQuestionで
+確認してから着手。
+
+- **一覧からその場プレビュー(ページ遷移なし)**:
+  - `src/components/collection/share-grid.tsx`を`"use client"`化し、カードを
+    `<Link href="/share/...">`から`<button onClick={() => setOpenShareId(...)}>`に変更。
+    パスワード付き共有も含めてすべてその場で開く方針(ユーザーが「推奨」ではなくこちらを選択)。
+  - 新規`src/components/share/share-lightbox.tsx`: `fixed inset-0 bg-black/90`のオーバーレイ。
+    パスワード付きの場合、マウント時に`/api/share/{id}/pages/1`へ実際にfetchしてステータスで
+    「既にview_tokenクッキーで認証済みか」を判定(専用の認証確認APIは新設せず、既存の画像配信
+    エンドポイントのステータスコードをそのまま流用)。未認証なら`<Card>`(白背景)で囲った
+    `<PasswordForm onSuccess={...}>`をその場に表示し、パスワード成功で画像表示に切り替わる。
+  - `src/components/share/password-form.tsx`に`onSuccess?: () => void`を追加。指定時は
+    従来の`window.location.reload()`の代わりにこれを呼ぶ(`/share/[shareId]`の通常表示は
+    従来通りreloadのまま、ライトボックス内でのみ状態切り替えで即座に画像へ)。
+  - 各ページの取得データ(pageNumber/width/height)は、`src/app/page.tsx`と
+    `src/app/collection/[id]/page.tsx`のPrismaクエリに`pages`を追加取得するだけで賄い、
+    新規APIは追加していない。あわせて`passwordHash`(生のbcryptハッシュ文字列)を
+    そのままクライアントに渡していた既存コードを`hasPassword: boolean`に変換してから
+    渡す形に修正(クライアントにハッシュを送る必要が無いための軽い堅牢化)。
+- **正方形に近いグリッド、自動折り返し**: サムネイルを`aspect-[3/4]`→`aspect-square`に、
+  グリッドを`grid-cols-2 gap-4 sm:grid-cols-3`→
+  `grid-cols-2 gap-3 sm:grid-cols-[repeat(auto-fill,minmax(130px,1fr))]`に変更。
+  スマホ幅は明示的に2列、sm以上は`auto-fill`で画面幅に応じて自動的に列数が増減する
+  (実際に1000px幅で4列、390px幅で2列になることをスクリーンショットで確認)。
+- **タップして初めて拡大・ドラッグ可能に**: `src/components/share/zoomable-image.tsx`に
+  `requireTapToActivate`propを追加。有効時は`TransformWrapper`の上に透明な
+  `<button class="absolute inset-0">`を重ねて最初のタップを丸ごと奪い(ピンチ・ダブルタップ・
+  パンを同時にブロックできる)、タップ後にオーバーレイをアンマウントして通常のズーム挙動に戻す。
+  ユーザーの指定により、ライトボックスだけでなく`/share/[shareId]`の通常表示
+  (`src/components/share/viewer.tsx`)にも適用した。
+- **ログインボタンを上部に移動**: トップページ・コレクションページ双方のヘッダーに
+  `Button`コンポーネント(`variant="secondary" size="sm"`)による「ログイン」ボタンを新設し、
+  下部にあった小さい「管理者の方はこちら」リンクは削除(ユーザーの指定により両ページに適用)。
+- 動作確認: Playwrightで(1)スマホ幅(390px)で正方形サムネイル・2列グリッド・上部ログイン
+  ボタンを目視、(2)パスワード無し共有をクリックしてもURLが変わらずライトボックスが開くこと、
+  (3)パスワード付き共有でその場にパスワード入力欄が出て、誤パスワードでエラー表示、
+  正しいパスワードでその場のまま画像に切り替わること(URLは変わらないまま)、
+  (4)タップ有効化オーバーレイが`/share/[shareId]`単体ページでも存在し、タップ後に消えること、
+  (5)1000px幅で自動的に4列になることを確認。`npm run build`(本番ビルド)も成功を確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の共有・スクリーンショット・
+  一時スクリプト・Playwrightは作業後にすべて削除・アンインストール済み。
+
+### 機能変更: 個別共有ページ(/share/[shareId])の廃止(2026-07-07)
+
+ユーザーから「個別のページはなくしていい」との指示。QRコード・Push通知・管理画面の共有URLが
+すべて`/share/{id}`を指していたため、削除の影響とリンク先の代替案を先に確認したところ、
+「すべてトップページ(/)にしてほしい。通知は『追加されました』と知らせるだけにして、
+自分で見に来て探してもらう形にしたい」との回答。あわせて「トップURLをリンク先にすることの
+セキュリティ上の懸念」について質問があったため、既に合意済みの「トップページで全共有一覧を
+見せる」設計の自然な延長であり、新たなリスクは「特定の1件だけのつもりのリンクが、実際には
+全共有の一覧も一緒に見えてしまう」点のみである(パスワード付き共有の保護自体は従来通り)と回答。
+
+- `src/app/share/[shareId]/page.tsx`・`not-found.tsx`・`src/components/share/viewer.tsx`を削除
+  (Viewerは削除したページからしか使われておらず、他に参照が無いことをgrepで確認済み)。
+- `src/app/api/admin/shares/[shareId]/notify/route.ts`: Push通知のクリック時遷移先を
+  `${origin}/share/${shareId}` → `${origin}/`に変更。
+- `src/app/admin/(dashboard)/[shareId]/page.tsx`: 共有URL/QRコードの参照先を
+  `${origin}/share/${share.id}` → `${origin}/`に変更。見出しも「共有URL」→
+  「閲覧用URL(全共有共通のトップページ)」に変えて、全共有で同じURLになったことを明示。
+  (この結果、どの共有の詳細ページを開いても同じURL/QRが表示される状態になったが、
+  今回はユーザーの指示通りの最小限の変更に留め、サイト全体で1つのQR/URL表示に集約する
+  UIの再設計は行わなかった)
+- `src/app/api/admin/shares/route.ts`: アップロード成功時のレスポンスに含めていた
+  `url: /share/{shareId}`も同様に`url: "/"`に修正(このフィールド自体はUI側では未使用だが、
+  実態と合わないまま残すのは不整合なため)。
+- `src/components/share/share-lightbox.tsx`: 削除したViewerが持っていた
+  `PushSubscribeButton`(共有ごとの更新通知購読ボタン)を、パスワード認証済み/不要な
+  コンテンツ表示部分に移設した。
+- `src/app/page.tsx`(トップページ): 同じくViewerにあった`InstallPromptButton`
+  (「ホーム画面に追加」ボタン、PWAインストール導線)をトップページに移設した
+  (サイト全体で1箇所あれば十分なため、ライトボックス側には移設していない)。
+- **ハマった点**: ルート削除直後、`npx tsc --noEmit`が`.next/types/app/share/[shareId]/page.ts`
+  (Next.jsが自動生成するルート型定義)を参照したまま`Cannot find module`エラーを出した。
+  これはNext.js側の生成物が削除に追従していないだけの一時的な状態で、devサーバー再起動 +
+  `npm run build`(本番ビルド、`.next/types`を再生成)で解消した。
+- **見つけて直した副次的な不具合**: `PushSubscribeButton`の「通知がブロックされています」
+  メッセージが`text-foreground/40`(背景色無し、暗い灰色)のスタイルで、これをこれまでの
+  白背景の閲覧画面から、今回新設した`bg-black/90`の暗いライトボックス内に移設した結果、
+  ほぼ視認できないほどのコントラスト不足になっていることが実機確認で判明。ボタン本体と
+  同じ`bg-surface`の丸背景を付けて、どの背景色の上でも読めるように修正した。
+- 動作確認: `curl`で`/share/{id}`が404になること、`/`が200のままであることを確認。
+  Playwrightで(1)一覧からのその場プレビュー内にPush購読ボタン/メッセージが存在し
+  読めることを実際のHTML/スクリーンショットで確認、(2)管理画面の共有詳細ページで
+  表示されるURLが`http://localhost:3000/`になっていることを確認。`npm run build`成功も確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の一時スクリプト・
+  スクリーンショット・Playwrightは作業後にすべて削除・アンインストール済み。
+
+### セキュリティ改善: トップページ(/)公開をやめ、ランダムURLの「ギャラリー」に一本化(2026-07-07)
+
+前段の「個別ページ廃止・トップページに全共有を表示」という変更について、ユーザーから
+「QRやURLを知らない人が勝手にのぞいたりできないか心配」との指摘。実際、ドメイン直下(/)を
+知っているだけで全共有一覧(パスワード無しの分)が誰でも見られる状態になっており、
+これは以前の「個別共有は推測不可能なURLでのみアクセス可能」という設計より弱い状態だった。
+対策案を複数提示して確認したところ、「ドメイン直下ではなく、既存の自動反映コレクション機能を
+使ったランダムURL自体を、日常使う一番のURLにしたい」との結論になった。
+
+- 新規`src/lib/collection/gallery.ts`: `getOrCreateGalleryCollection()`。
+  `autoIncludeAll: true`のCollectionを1件だけ持つ運用とし、無ければ初回アクセス時に自動作成する
+  (find-or-create、通常のコレクション機能をそのまま「唯一のギャラリー」として再利用しているだけで、
+  スキーマ変更は不要)。
+- `src/app/page.tsx`: トップページ(/)を元の`redirect("/admin")`に戻した(ドメイン直下は
+  管理者向けのみになり、一般閲覧者への情報露出が無くなる)。
+- `src/app/collection/[id]/page.tsx`: 元々Viewerにあった`InstallPromptButton`
+  (「ホーム画面に追加」)をここに移設(今後こちらが実質的な閲覧者の入口になるため)。
+  また、共有0件の場合に`notFound()`していたのを「まだ共有はありません」という空表示に変更
+  (ギャラリーは共有が0件の状態でも404にせず開けるべきため)。
+- `src/app/manifest.ts`: 同期関数だったのを`async`に変更し、`start_url`を`/`から
+  `getOrCreateGalleryCollection()`で取得したギャラリーのURL(`/collection/{id}`)に変更。
+  これによりPWAインストール後にホーム画面から起動した際も、以前のように管理者ログイン画面
+  ではなく正しくギャラリーへ着地するようになった。
+- `src/app/api/admin/shares/[shareId]/notify/route.ts`・`src/app/api/admin/shares/route.ts`:
+  Push通知のクリック時遷移先・アップロード成功レスポンスのurlフィールドを、
+  `${origin}/`から`${origin}/collection/{ギャラリーのid}`に変更。
+- 管理画面側もあわせて整理: 個別共有の詳細ページ(`src/app/admin/(dashboard)/[shareId]/page.tsx`)
+  にあった「共有URL/QRコード」カードは、どの共有を開いても同一のURLしか表示しない状態に
+  なっていたため削除し、代わりにダッシュボードのトップ(`src/app/admin/(dashboard)/page.tsx`)に
+  1箇所だけ「閲覧用URL(社内で共有するURL・QRコードはこれ1つだけ)」カードとしてまとめた。
+- 動作確認: `curl`で`/`が`/admin`へ307リダイレクトすること、`manifest.webmanifest`の
+  `start_url`がギャラリーの`/collection/{id}`になっていること、そのURLに実際に
+  3件の共有(text・テスト2・テスト画像)が表示されることを確認。管理画面のダッシュボードに
+  URL/QRカードが1つだけ表示され、個別共有の詳細ページからは無くなっていることを
+  スクリーンショットで確認。`npm run build`(本番ビルド)成功も確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の一時スクリプト・
+  スクリーンショット・Playwrightは作業後にすべて削除・アンインストール済み。
+
+### セキュリティ改善: 管理者ログイン画面もランダムURL化(2026-07-07)
+
+前段のギャラリーURL対応に続き、ユーザーから「ログイン画面のURLも同じ仕組みにしてほしい。
+全員が最初一覧のページに入り、ログインしたい人はログインボタンを押して、ランダムURLの
+ログイン画面に飛べるようにしたい」との要望。従来`/admin`→`/admin/login`という固定・推測可能な
+パスだったため、ドメインを知っている人なら誰でも「管理画面がある」ことと「ログイン試行できる場所」
+を発見できてしまう状態だった(パスワード自体は守られているが、攻撃対象を晒している状態)。
+
+- `.env`/`.env.example`に`ADMIN_LOGIN_PATH`(nanoid 24文字のランダム値)を追加。
+  生成用に新規`scripts/generate-admin-login-path.ts`を作成。
+- 新規ルート`src/app/a/[token]/page.tsx`: URLパラメータの`token`が`ADMIN_LOGIN_PATH`と
+  一致した場合のみログインフォームを表示し、一致しなければ`notFound()`(素の404)。
+  管理画面の存在自体を推測させない。
+- `src/app/admin/login/`(旧固定パスのログインページ)は削除。ログインフォーム本体は
+  `src/components/admin/login-form.tsx`として再利用可能な場所に移設し、「一覧に戻る」リンクの
+  遷移先を固定値`/`ではなく、呼び出し側から渡す`backHref`(ギャラリーのURL)に変更。
+- `src/proxy.ts`: `PUBLIC_ADMIN_PAGE_PATHS`(`/admin/login`の除外リスト)を廃止し、
+  `/admin`配下は例外なく認証必須に。未認証時の挙動を「`/admin/login`へリダイレクト」から
+  「素の404を返す(`new NextResponse(null, { status: 404 })`)」に変更。これにより
+  `/admin`という固定パスへの直接アクセスでは、認証されていない限り何も存在しないように見える。
+- ログインボタン・遷移先の付け替え:
+  - `src/app/collection/[id]/page.tsx`(ギャラリー/コレクション一覧ページ)の「ログイン」ボタンは、
+    サーバー側で`process.env.ADMIN_LOGIN_PATH`を読み、`/a/{token}`へ直接リンクするように変更。
+  - `src/app/api/admin/logout/route.ts`: ログアウトAPIのレスポンスに`redirectTo`
+    (ギャラリーのURL)を含めるように変更。`logout-button.tsx`はこれを見て遷移するように修正
+    (クライアント側は`ADMIN_LOGIN_PATH`という秘密情報を持たせたくないため、
+    サーバー側で解決したURLだけを渡す設計)。
+  - `src/app/not-found.tsx`: 「管理画面に戻る」→「一覧に戻る」に文言変更し、遷移先も
+    ギャラリーのURLに変更(`/admin`へのリンクは、未ログイン時にただの404になり意味が
+    無くなったため)。
+  - `src/components/share/password-form.tsx`: 「管理者の方はこちら」リンクを削除
+    (ギャラリーページの上部に既にログインボタンがあるため冗長。ランダムなトークンを
+    `ShareGrid`→`ShareLightbox`→`PasswordForm`と3階層下まで渡す複雑さを避けるための判断)。
+- **ハマった点**: ルート削除(`/admin/login`)直後、`.next/dev/types`・`.next/types`に残った
+  古い自動生成のルート型定義ファイルが`tsc`/`next build`のTypeScriptチェックで
+  `Cannot find module`エラーを起こした。今回はdevサーバー再起動+`npm run build`だけでは
+  完全には解消せず、最終的に`.next`ディレクトリ自体を削除してからビルドし直すことで解決した
+  (ルートを削除した直後は、単なる再起動よりも`.next`の完全削除の方が確実)。
+- 動作確認: `curl`で(1)`/admin`(未ログイン)が404、(2)旧`/admin/login`も404、
+  (3)`/a/`+誤ったトークンが404、(4)`/a/`+正しい`ADMIN_LOGIN_PATH`の値が200でログインフォームを
+  表示、(5)ギャラリーページの「ログイン」ボタンが実際に`/a/{正しいトークン}`にリンクしていること、
+  (6)正しいパスワードでログイン→セッションCookie発行→`/admin`が200になること、
+  (7)ログアウトAPIのレスポンスに正しいギャラリーURLが`redirectTo`として含まれることを確認。
+  `npm run build`(`.next`を一度削除してからのクリーンビルド)成功も確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。README.mdのセットアップ手順・
+  セキュリティ節にも`ADMIN_LOGIN_PATH`の説明を追記した。
+
+### 機能削除・簡素化: コレクション機能を廃止し、固定の1つのギャラリーに統一(2026-07-07)
+
+ユーザーから「コレクションの機能自体いらない気がします。デフォルトで一つ場所があればいい。
+全部そこに入るようにしてほしい」との指摘。実際、複数コレクションを作成・管理できる汎用機能は
+使われておらず、常に「全共有自動反映」の1件だけが使われていた。DBを確認し、他に手動作成された
+コレクションが無い(自動反映用の1件のみ)ことを確認したうえで、機能ごと削除して簡素化した。
+
+- **スキーマ変更**: `Collection`・`CollectionItem`モデルと、`Share`の`collectionItems`リレーションを
+  完全に削除(`prisma migrate dev --name remove_collections`)。DBに複数コレクションを持たせる
+  必要が無くなったため。
+  **ハマった点**: 移行前にDBを空にしていたつもりが、実行中のdevサーバーが裏で
+  `getOrCreateGalleryCollection()`(find-or-create処理)を呼び出し、削除した直後に別IDで
+  再作成してしまっていた(`prisma migrate dev`が「空でないテーブルを削除しようとしている」という
+  非対話確認を要求しエラーになったことで発覚)。devサーバーを完全に停止してから再度削除・
+  マイグレーションを実行して解決。
+- **新しい仕組み**: DB無しの`.env`ベースの固定値に置き換えた。新規`GALLERY_PATH`環境変数
+  (nanoid 24文字。生成用に`scripts/generate-gallery-path.ts`を追加)を導入し、
+  既存で使っていたギャラリーURLの値(`kuyyG3sicTZTjLY4cl8t8um9`)をそのまま設定することで、
+  ユーザーが既に確認・共有していたURLを変更せずに済ませた。
+  新規`src/lib/gallery.ts`の`getGalleryPath()`/`getGalleryUrl()`が、DBを一切使わず
+  `process.env.GALLERY_PATH`を直接返す(`ADMIN_LOGIN_PATH`と全く同じ設計思想)。
+- `src/app/collection/[id]/page.tsx`: `Collection`テーブルへの問い合わせを廃止し、
+  URLの`id`パラメータが`GALLERY_PATH`と一致するかだけを見て(一致しなければ`notFound()`)、
+  一致すれば全共有を直接`prisma.share.findMany()`で取得して表示するだけのシンプルな実装に変更。
+- 削除したファイル: `src/lib/collection/`(旧gallery.ts)、
+  `src/app/admin/(dashboard)/collections/`(コレクション詳細管理ページ一式)、
+  `src/app/api/admin/collections/`(作成・更新・削除API一式)、
+  `src/components/admin/{create-collection-form,collection-settings-form,collection-list-item,
+  delete-collection-button,share-checkbox-list}.tsx`。
+- `src/app/admin/(dashboard)/page.tsx`(ダッシュボード)から「コレクション」作成フォームと
+  「コレクション一覧」セクションを削除。「閲覧用URL」カードは残し、`getGalleryUrl()`から
+  直接値を取得するように変更(DBアクセス不要になった分、若干軽量化)。
+  `notify`ルート・アップロードAPIのレスポンス・`manifest.ts`(`start_url`)・
+  `not-found.tsx`・ログアウトAPIのリダイレクト先も、すべて`getOrCreateGalleryCollection()`
+  (DB問い合わせ)から`getGalleryPath()`/`getGalleryUrl()`(環境変数参照のみ)に置き換えた。
+- 動作確認: 削除後にルート一覧をビルドで確認し、旧コレクション関連ルート
+  (`/admin/collections/*`、`/api/admin/collections/*`)が一覧から消えていることを確認。
+  既存のギャラリーURL(`/collection/kuyyG3sicTZTjLY4cl8t8um9`)・管理者ログインURLとも、
+  以前と全く同じ値のまま引き続き動作すること(共有3件の表示、誤ったIDでの404含む)、
+  管理画面ダッシュボードから「コレクション」関連のUIが消えて閲覧用URLカードのみになっている
+  ことをスクリーンショットで確認。`npm run build`(`.next`削除後のクリーンビルド)成功も確認。
+  `npx tsc --noEmit` / `npm run lint` ともにエラー無し。
+
+### 機能追加: PDF編集機能(トリミング・拡大縮小・AIインペインティング)(2026-07-07)
+
+ユーザーから「ログイン後に、PDFを編集するか共有するかを選ぶ1ページを挟みたい。編集では
+トリミング・拡大縮小・AIインペインティング(消しゴムマジック的なもの、印鑑・手書き・付箋・
+ゴミ・指などを囲むとAIが自然に補完して消す)を実装してほしい」との要望。規模が大きいため、
+着手前にAskUserQuestionで3点確認: (1)AIインペインティングのバックエンド→外部AI API利用を選択、
+具体的にはOpenAIのgpt-image-1画像編集APIを指定。(2)編集後の行き先→ダウンロード/別画像の編集/
+共有へ進む、を選べるようにしたい。(3)OpenAI APIキーは「持っているので後で自分で.envに設定する」。
+
+- **ルーティング再構成**: `src/app/admin/(dashboard)/page.tsx`を「PDFを編集」「共有する」の
+  2択画面に変更。従来のダッシュボード内容(閲覧用URL/QRカード・アップロード・共有一覧)は
+  `src/app/admin/(dashboard)/share/page.tsx`に、共有詳細ページは
+  `src/app/admin/(dashboard)/share/[shareId]/page.tsx`に移設。関連する内部リンク
+  (`upload-dropzone.tsx`・`share-list-item.tsx`・`delete-share-button.tsx`の遷移先、
+  レイアウトヘッダーのタイトルリンク)もすべて`/admin/share`配下に更新。
+  ログイン成功後・ログアウト後の遷移先は引き続き選択画面(`/admin`)のまま。
+- **PDF→画像変換API**: 新規`POST /api/admin/edit/convert`。共有作成とは異なり、DB保存は一切せず
+  既存の`convertPdfToWebpPages`(単一PDF用)をそのまま使ってページ毎の画像をbase64 data URLとして
+  返すだけ(編集セッション自体はブラウザのメモリ内(React state)で完結させ、サーバー側に
+  中間状態を一切残さない設計)。
+- **トリミング・拡大縮小ツール**: いずれもAI不要のためブラウザのCanvas APIだけで完結。
+  トリミングは新規導入した`react-image-crop`(v11)でドラッグ選択UIを実装し、選択範囲を
+  実ピクセル座標に変換してcanvasに切り出す。拡大縮小は50/75/100/150/200%のプリセットボタン+
+  幅の直接入力(アスペクト比維持)でcanvasに再描画するだけのシンプルな実装。
+- **AIインペインティング(消しゴムマジック)**: 新規`src/components/admin/pdf-editor/inpaint-tool.tsx`。
+  表示用キャンバス(塗った範囲を半透明の赤でプレビュー)と、実際のマスク用キャンバス(初期状態を
+  不透明で塗りつぶし、ブラシで塗った箇所だけ`globalCompositeOperation: "destination-out"`で
+  透明にする、というOpenAIのマスク仕様通りの実装)を同時に描画する方式。ブラシの太さはスライダーで
+  調整可能。新規`POST /api/admin/edit/inpaint`が`openai`パッケージ経由でgpt-image-1の
+  `images.edit`(image+mask+prompt)を呼び出し、結果を返す。
+  **設計判断**: gpt-image-1の出力解像度は固定サイズ(1024x1024等)になり元画像とサイズが変わって
+  しまうため、サーバー側で`sharp`を使い呼び出し元から渡された元のwidth/heightへ`resize(fit:"fill")`
+  してから返すことで、ページ画像として違和感なく差し替えられるようにした。
+  新規環境変数`OPENAI_API_KEY`を`.env`/`.env.example`に追加(値はユーザー自身が後で設定する運用のため
+  空のまま)。未設定時は明確なエラーメッセージを返すことを確認済み。
+- **編集後のアクション**: 各ページごとに「この画像をダウンロード」ボタン(`<a download>`で
+  data URLをそのままダウンロード)。全体操作として「別のPDFを編集する」(状態リセット)と
+  「共有へ進む」(タイトル・パスワード・有効期限を指定するミニフォームを表示)を用意。
+  「共有へ進む」用に新規`POST /api/admin/shares/from-images`を追加。既存の`/api/admin/shares`が
+  PDFアップロード+変換を前提にしているのに対し、こちらは編集済みの画像(PNG/任意形式)を
+  直接受け取り、`sharp`でWebPに再エンコードして共有を作成する(PDFへ戻す往復変換を避けるため)。
+  成功後は通常の共有詳細ページ(`/admin/share/{shareId}`)へ遷移する。
+- **ハマった点(重要)**: 「共有へ進む」実行時に「通信エラーが発生しました」となり原因調査したところ、
+  data URL(canvas由来の編集画像)を`FormData`へ詰めるために使っていた
+  `await fetch(dataUrl).then(r => r.blob())`というよくあるパターンが、Step11で導入した
+  CSPの`connect-src 'self'`によってブロックされていた(`data:`スキームへの`fetch()`は
+  `connect-src`の対象になり、`'self'`だけでは許可されない)。CSPを緩めて`data:`を許可する
+  のではなく、`fetch`を使わずbase64を手動デコードして`Blob`を組み立てる方式
+  (`atob()`+`Uint8Array`+`new Blob()`)に書き換えることで、CSPを一切緩めずに解決した。
+  これは実際にPlaywrightで「共有へ進む」フローを通しで検証した際に発見できた不具合で、
+  `tsc`/`lint`だけでは検出できないランタイムのCSP違反だった。
+- 動作確認: Playwrightで(1)ログイン後に選択画面が表示されること、(2)「PDFを編集」から
+  実際のPDF(`text.pdf`)をアップロードして正しく画像に変換されること、(3)トリミング
+  (ドラッグ選択→適用)・拡大縮小(50%プリセット→適用)が実際にサイズを変えて反映されること、
+  (4)AIで消すツールでブラシ操作するとマスクが赤く可視化され「AIで消す」ボタンが有効になること
+  (実際のOpenAI呼び出しはAPIキー未設定のため、代わりにAPIが明確な設定エラーを返すことを別途確認)、
+  (5)「共有へ進む」で実際に新しい共有(1ページ、正しいタイトル)が作成され詳細ページへ遷移すること、
+  (6)ダウンロードボタンが実際にファイルをダウンロードできることを確認。`npm run build`
+  (本番ビルド)成功、`npx tsc --noEmit` / `npm run lint` ともにエラー無し。確認用の共有データ・
+  一時スクリプト・Playwrightは作業後にすべて削除・アンインストール済み。
+  README.mdにも`OPENAI_API_KEY`の説明を追記予定(次回のREADME更新でまとめて反映)。
+
+### README.md更新(2026-07-07)
+
+前回積み残していたREADME.mdの更新を実施: 環境変数テーブルに`GALLERY_PATH`
+(そもそも記載漏れだった)と`OPENAI_API_KEY`(取得先リンク・gpt-image-1が必要な旨)の行を追加、
+セットアップ手順の説明文をログイン後の新しい選択画面(「PDFを編集」/「共有する」)に合わせて
+書き換え、ディレクトリ構成図を現在のルート構成(`a/[token]`・`admin/(dashboard)/share`・
+`admin/(dashboard)/edit`・`collection/[id]`・`components/admin/pdf-editor/`等)に更新。
+併せて永続メモリ(プロジェクト進捗)にもPDF編集機能・選択画面の追加を反映した。
+
+### 機能追加: 選択画面のアイコン拡大・画像ファイル対応・画像形式変換(2026-07-07)
+
+ユーザーから3点の追加要望: (1)「PDFを編集」/「共有する」の2つの枠をもっと大きく、
+分かりやすいアイコンを中に大きく表示してほしい。(2)PDF以外の通常の画像ファイル
+(JPEG/PNG/WebP)でも共有・編集ができるようにしてほしい。(3)編集画面で画像ファイルの形式変換
+ができるようにし、共有時にもPDF等をどの画像形式に変換するか選べるようにしてほしい。
+
+- **選択画面の見た目**: `src/app/admin/(dashboard)/page.tsx`のカードを`min-h-64`
+  (sm以上は`min-h-72`)・`p-8`に拡大し、中央にHeroicons相当の手描きインラインSVG
+  (編集=鉛筆アイコン、共有=シェアアイコン、`h-16 w-16`/`sm:h-20 w-20`)を追加。
+  新規npm依存は追加せず、SVGパスを直接コンポーネント内に埋め込んだ。
+- **画像フォーマット共通ライブラリ**: 新規`src/lib/image/format.ts`。`ImageOutputFormat`
+  (`"webp"|"jpeg"|"png"`)型と、選択肢一覧・拡張子/MIME相互変換のヘルパーを一箇所に集約。
+  既定値は従来通り`webp`。
+- **アップロード検証の一般化**: 従来PDF専用だった`src/lib/pdf/validate.ts`
+  (`assertValidPdfUpload`)を削除し、新規`src/lib/upload/validate.ts`の
+  `assertValidUpload`に統合。拡張子とマジックバイト(PDFは`%PDF-`、PNG/JPEG/WebPは
+  それぞれの先頭バイト)の二重チェックで、PDFか画像かを判定しつつ拡張子偽装ファイルを弾く。
+  エラークラスも`PdfValidationError`/`PdfConversionError`から共通の
+  `MediaValidationError`/`MediaConversionError`(`src/lib/upload/errors.ts`)に統合。
+- **PDF変換にフォーマット引数を追加**: `src/lib/pdf/convert.ts`の
+  `convertPdfToWebpPages`/`convertPdfsToWebpPages`を`convertPdfToImagePages`/
+  `convertPdfsToImagePages`にリネームし、出力形式(`ImageOutputFormat`、既定webp)を
+  引数で指定できるように変更(`@napi-rs/canvas`の`canvas.toBuffer()`はpng/jpeg/webpの
+  いずれも直接エンコード可能なため、変換ロジック自体はほぼそのまま形式切り替えに対応できた)。
+- **画像ファイル単体の変換**: 新規`src/lib/image/convert-image.ts`の`convertImageToPage`。
+  PDFと同じ最大寸法制約(長辺2480px、`sharp`の`resize(fit:"inside", withoutEnlargement:true)`)
+  を適用しつつ、`.rotate()`でEXIFの回転情報を補正してから指定形式へ再エンコードする。
+- **アップロード処理の統合ディスパッチャ**: 新規`src/lib/upload/convert.ts`の
+  `convertUploadsToPages`。ファイル毎に`assertValidUpload`でPDF/画像を判定し、
+  PDFなら`convertPdfToImagePages`、画像なら`convertImageToPage`を呼んでページ配列に
+  結合・通し番号を振り直す(PDFと画像が混在したアップロードにも対応)。
+  `POST /api/admin/shares`・`PATCH /api/admin/shares/[shareId]`はこのディスパッチャに
+  差し替え、フォームの`outputFormat`フィールド(既定webp)を尊重するように変更。
+  差し替え(PATCH)時の旧ページ画像クリーンアップは、拡張子が変わるケース(形式変更時)に
+  対応するため、ページ番号からの拡張子推測ではなく実際にDBに記録されていた
+  `storageKey`を基準に不要分だけ削除するよう修正した。
+- **配信時のContent-Type**: `GET /api/share/[shareId]/pages/[n]`が`Content-Type`を
+  `"image/webp"`固定で返していたのを、`storageKey`の拡張子から`mimeForExtension()`で
+  引くように修正(形式選択に対応するための必須修正)。
+- **編集画面(/admin/edit)の画像対応**: ドロップゾーンがPDFに加えJPEG/PNG/WebPも受け付ける
+  ように変更。`POST /api/admin/edit/convert`もPDF/画像を判定して処理を振り分け。
+  `EditorPage`型に`format: ImageOutputFormat`フィールドを追加し、トリミング・拡大縮小・
+  AIインペインティングの各ツールのonApply結果にも`format: "png"`を明示するようにした
+  (これらはいずれもcanvasの`toDataURL()`既定であるPNGを返しているため)。
+- **編集画面の新ツール「形式変換」**: 新規`src/components/admin/pdf-editor/format-tool.tsx`。
+  webp/jpeg/pngのボタンから選び、canvasに再描画して`toDataURL(mime, quality)`で
+  変換する(JPEGは透過を保持できないため、変換前に白背景で塗りつぶす一手間を追加)。
+  ダウンロードボタンのファイル拡張子も、選択中ページの`format`から動的に決定するよう修正。
+- **共有作成側の画像アップロード・差し替えフォーム**: `upload-dropzone.tsx`・
+  `replace-pdf-form.tsx`ともにPDFに加え画像ファイルを受け付けるよう`accept`属性・
+  検証ロジックを更新し、`IMAGE_OUTPUT_FORMATS`から選ぶ変換形式ボタン群を追加。
+- **from-imagesルートの形式尊重**: 編集画面から「共有へ進む」で使う
+  `POST /api/admin/shares/from-images`が、従来は常にWebPへ再エンコードしていたのを、
+  各画像Blobの実際のMIMEタイプ(編集画面の形式変換ツールで選んだ形式がそのまま反映される)を
+  `formatForMime()`で判定し、その形式のまま`sharp`で再エンコード・保存するように変更。
+- 動作確認: Playwrightで(1)選択画面のスクリーンショットを撮り、カード内に大きなSVGアイコンが
+  2つ表示されていること、(2)`/admin/share`で実際のJPEG画像を選び出力形式を「JPEG」に切り替えて
+  アップロードすると共有が作成され、配信APIの`Content-Type`が`image/jpeg`になっていること、
+  (3)既存のPDFアップロード(既定のWebP出力)が引き続き正しく動作すること(回帰確認)、
+  (4)`/admin/edit`で実際のJPEG画像をアップロードし、「形式変換」タブでPNGに変換した後
+  「共有へ進む」で共有を作成すると、配信APIの`Content-Type`が`image/png`になっていることを確認。
+  `npm run build`(本番ビルド)成功、`npx tsc --noEmit` / `npm run lint`ともにエラー無し。
+  確認用の共有データ・一時スクリプト・スクリーンショット・Playwrightは作業後にすべて削除・
+  アンインストール済み。
+
+### 不具合対応: 選択画面のPDF/画像編集入口へのUI改善・AIインペインティングの品質改善(2026-07-07)
+
+ユーザーから2点の要望。(1)AIインペインティングを実際に使ってみたところ、塗った範囲だけでなく
+ページ全体の文字が激しく歪んでしまう。(2)編集画面に「1つ前に戻る」「1つ先に進む」ボタンを追加してほしい。
+
+- **戻る/進むボタン**: `pdf-editor.tsx`に`history`/`future`という2つのスタック(state)を追加。
+  各ツール(トリミング・拡大縮小・形式変換・AIで消す)のonApply実行前に現在の`pages`を
+  `history`へ積み、`future`をクリアする。「1つ前に戻る」で`history`の末尾を`pages`に戻しつつ
+  現在の状態を`future`へ積む(逆が「1つ先に進む」)。ボタンはツールタブ(トリミング等)と
+  同じ行の先頭に配置(初回はタブの上に別行で置いたが、ユーザー指示で同じ行に統合)。
+- **AIインペインティングの歪み(1回目の対処、不十分だった)**: gpt-image-1の出力解像度が
+  1024x1024等の固定3種類しか無く、元画像の縦横比と一致しないため、`sharp`の`resize(fit:"fill")`
+  (縦横比を無視した引き伸ばし)で元サイズに戻す際にページ全体の文字が歪んでいた。まず
+  (a)元画像に近い縦横比の出力サイズを選ぶ、(b)引き伸ばしではなく`fit:"cover"`(縦横比を保って
+  拡大縮小+中央トリミング)に変更、を試したが、ユーザーからは「全然だめ、全体がすごく歪む」と
+  改善が確認できなかった。
+- **AIインペインティングの歪み(2回目の対処、根本原因の特定)**: 原因は「ページ全体を毎回AIに
+  渡していること」自体にあると判断。生成系画像モデルは画像全体を一度エンコード・デコードする
+  ため、たとえ縦横比を合わせても、その往復で全体(特に細かい文字)の画質が劣化する。対処として、
+  塗った範囲(ブラシストロークの外接矩形)の周囲に文脈用の余白を持たせた正方形だけを切り出して
+  AIに渡し、返ってきた結果を元のページ画像(無加工)の上にその位置だけ貼り戻す方式に変更
+  (`inpaint-tool.tsx`に`boundsRef`でブラシの外接矩形を追跡する処理を追加、
+  `CROP_PADDING_FACTOR`/`MIN_CROP_SIZE`定数で余白・下限サイズを調整)。これにより、
+  塗っていない部分はAIを一切経由せず完全に無加工のまま残るはずだった。
+- **AIバックエンドの入れ替え(ユーザー判断)**: 上記のクロップ方式に修正した上でも
+  ユーザーからは改善が見られないとの報告があり、「LaMaというものはどうですか」と提案を受けた。
+  AskUserQuestionで導入方法を確認したところ、「Replicate経由でLaMaを使う」を選択
+  (自前サーバー不要・従量課金・Python環境構築が不要なため)。OpenAIの`gpt-image-1`画像編集API
+  (テキストプロンプトで指示する汎用画像生成モデル)を、Replicateでホストされている
+  `allenhooo/lama`(LaMa: Resolution-robust Large Mask Inpainting with Fourier Convolutions、
+  テキストプロンプト不要の専用インペインティングモデル)に完全に置き換えた。
+  - 依存関係: `openai`パッケージを削除し、`replicate`パッケージを追加。
+  - 環境変数: `OPENAI_API_KEY`を削除し、`REPLICATE_API_TOKEN`(必須)・
+    `REPLICATE_LAMA_MODEL`(任意、既定値`allenhooo/lama`)を`.env`/`.env.example`に追加。
+  - `src/app/api/admin/edit/inpaint/route.ts`を全面書き換え。LaMaのマスク仕様は
+    「白=修復対象、黒=保持」という濃淡グレースケール画像であり、このアプリのマスクcanvas
+    (「不透明=保持、透明=修復対象」というアルファチャンネル方式、元々OpenAIのマスク仕様向けに
+    設計)とは方式が異なるため、`sharp`でアルファチャンネルを抽出(`extractChannel("alpha")`)
+    して反転(`negate()`)し、グレースケールマスクに変換してから渡す変換ステップを追加した
+    (クライアント側のcanvas描画ロジックは一切変更していない)。LaMaは「resolution-robust」を
+    謳っており基本的に入力と同じ解像度で結果を返すため、以前のような固定サイズへの強制リサイズは
+    不要になったが、念のためサイズが異なる場合のみ`fit:"cover"`でリサイズするフォールバックを残した。
+  - Replicateの公式Node SDK(`replicate`パッケージ)の`replicate.run()`はモデルによって
+    出力が「URL文字列」「FileOutput(blob()/url()を持つReadableStream)」のいずれの形でも
+    返り得るため、両方に対応する`extractOutputBuffer()`ヘルパーを実装した。
+  - UIは指示通り一切変更していない(`inpaint-tool.tsx`のブラシ描画・クロップ&貼り戻しロジックは
+    そのまま、バックエンドのAPI呼び出し先だけを差し替えた)。
+  - `npx tsc --noEmit` / `npm run lint` / `npm run build`いずれもエラー無しを確認。
+    実際のReplicate呼び出し自体は`REPLICATE_API_TOKEN`をユーザーが取得・設定した後に
+    実機で確認予定(取得方法をREADME.mdの環境変数テーブルに追記済み)。
+
+### 実機確認: Replicate/LaMa連携の動作確認とハマった点(2026-07-07)
+
+ユーザーがReplicateアカウントを作成し`REPLICATE_API_TOKEN`を設定。実際にAPIを呼び出して
+段階的に3つの問題を解決し、最終的に動作確認まで完了した。
+
+- **1回目のエラー(404 Not Found)**: `allenhooo/lama`をowner/name形式のみで呼び出すと
+  `https://api.replicate.com/v1/models/allenhooo/lama/predictions`が404を返した。
+  このモデルは「公式モデル」化されておらず、owner/nameだけでは解決できないことが判明。
+  Replicateの`/allenhooo/lama/versions`ページ(WebFetchはJS描画のため内容を拾えず、
+  `curl`で生HTMLを取得し`grep -oE "[0-9a-f]{64}"`で正確な64文字のバージョンハッシュを抽出)
+  から最新バージョン`cdac78a1bec5b23c07fd29692fb70baa513ea403a39e643c48ec5edadb15fe72`を特定し、
+  `"allenhooo/lama:{version}"`という形式(バージョン固定)に変更して解決。
+  **教訓**: 長い16進数のハッシュ文字列をLLM経由のWebFetchで抽出すると誤りが混入するリスクが
+  あるため、正確性が必要な場合は`curl`+`grep`で生データから直接抽出する方が安全。
+- **2回目のエラー(402 Payment Required・insufficient credit)**: モデル解決自体は成功したが、
+  Replicateアカウントにクレジットが無く実行できず。ユーザーがBilling画面で
+  オートリロードのチェックボックスだけオンにして金額欄を空欄のまま保存しており、
+  実際にはクレジットが購入されていなかった。「When credit balance goes below」に$5、
+  「Reload credit balance to」に$15(いずれも最低額)を入力して保存することで、
+  残高が閾値以下だったため即座に$15分課金され、数分後に反映された。
+- **動作確認**: 白背景に黒い四角(消したい物体を模した合成画像)+その四角部分だけを
+  修復対象としたマスクを、`/api/admin/edit/inpaint`に直接POSTするテストスクリプトで検証。
+  ステータス200で返り、結果画像は黒い四角が周囲の白背景と自然になじんで消えており、
+  期待通りの「消しゴムマジック」動作を確認できた。検証用の一時スクリプト・画像は作業後に削除済み。
+  これでOpenAI→Replicate/LaMaへのAIインペインティング移行は完全に完了した。
+
+### 機能追加: 描画ツール(スポイト付き)(2026-07-07)
+
+ユーザーから「描画の機能も追加してほしい。カラーにはスポイトの機能もほしい」との要望。
+新規`src/components/admin/pdf-editor/draw-tool.tsx`を追加し、編集画面のツールタブに
+「描画」を追加(トリミング・拡大縮小・描画・形式変換・AIで消す、の並び)。
+
+- キャンバスに直接フリーハンドで線を描き込めるシンプルな描画ツール(AIによる補完は行わない、
+  選んだ色でそのまま描画するだけ)。`<input type="color">`で色選択、スライダーでペンの太さ調整。
+- **スポイト機能**: ブラウザのEyeDropper API(Chromium限定・画面全体が対象)には依存せず、
+  自前実装にした。「スポイトで拾う」ボタンを押すと次のタップが描画ではなく色抽出モードになり、
+  `ctx.getImageData(x, y, 1, 1)`で編集中の画像そのものの、タップした位置のピクセル色を読み取って
+  描画色にセットする(EyeDropper API非対応ブラウザでも動作し、かつ画像内の色だけを対象にできる)。
+  data URL由来のcanvasは同一オリジン扱いのため、`getImageData`がCORSでブロックされる心配もない。
+  「描画をやり直す」で元の画像に戻せる。他ツールと同じく「描画を適用」でページ画像を更新し、
+  既存の「1つ前に戻る」で取り消せる。
+  `npx tsc --noEmit` / `npm run lint` / `npm run build`いずれもエラー無し。
+
+### 不具合修正: トリミングの範囲がずれるバグ(2026-07-07)
+
+ユーザーから「トリミングが思い通りにできなかった」との報告。`crop-tool.tsx`を調査したところ、
+実ピクセル座標への変換に使うscaleX/scaleY(表示サイズ÷実サイズ)の計算が、
+`loadImage(dataUrl)`で新規生成した(DOMに接続されていない)`Image`要素の`width`/`height`を
+使っていたことが原因と判明。DOMに繋がっていない`Image`要素の`width`/`height`は常に
+`naturalWidth`/`naturalHeight`と同値になってしまうため、倍率が常に1倍として計算され、
+実際に画面上でCSSにより縮小表示されている(`max-h-[60vh]`)分だけ、選択した範囲と
+実際に切り出される範囲が大きくズレていた(表示が縮小されているほど、選択した範囲よりも
+遥かに小さい・ズレた範囲が切り出されてしまう)。
+修正: `ReactCrop`内の実際に画面に表示されている`<img>`要素に`ref`を張り、
+その要素の`width`/`height`(表示サイズ)と`naturalWidth`/`naturalHeight`(実サイズ)から
+scaleX/scaleYを計算するように変更。Playwrightで縮小表示が発生する条件(ビューポート幅500px、
+画像は1446x551px)を再現し、表示領域の25%〜75%(50%×50%)をドラッグ選択→適用した結果が
+正確に元画像の50%サイズ(723x276px)になることを確認、修正前の挙動との違いを実機で確認できた。
+
+### 機能追加: 「PDFのまま(変換しない)」共有オプション(2026-07-07)
+
+ユーザーから「形式を変えずPDFのままも選べるようにしてほしい(共有作成・PDF編集画面の書き出し両方)」
+との要望。AskUserQuestionで確認: 適用範囲は共有作成アップロードとPDF編集画面の書き出し両方、
+閲覧者が開いたときはブラウザ標準のPDFビューアで表示、という方針で実装。
+
+- **依存関係・スキーマ**: 新規`pdf-lib`パッケージを追加。`Share`モデルに
+  nullableな`pdfStorageKey`列を追加(`prisma migrate dev --name add_pdf_passthrough`)。
+  非nullの場合、その共有は画像変換せず元のPDFのまま保存されていることを示し、
+  `pages`には一覧・管理画面用のサムネイル(1ページ目を画像化したもの)だけが1件入る。
+- **新規`src/lib/pdf/build.ts`**: `buildOutputPdf()`が、PDFと画像が混在した入力ファイル群を
+  1つのPDFに結合する(PDFは`pdf-lib`の`copyPages`で全ページをコピー、画像は
+  `sharp`でPNGに正規化してから`embedPng`で1ページとして埋め込む、既存の「複数PDF/画像混在
+  アップロードを1つの共有に結合する」挙動をPDFのまま実現している)。`getPdfPageCount()`で
+  結合後の実ページ数を取得する。
+- **`src/lib/image/format.ts`の拡張**: `ImageOutputFormat`(webp/jpeg/png、ラスタ変換専用)とは
+  別に、それに"pdf"を加えた`OutputFormat`型・`OUTPUT_FORMATS`一覧・`isOutputFormat()`を追加。
+  ラスタ専用の変換ロジック(canvas描画・sharp変換)には手を入れず、共有作成・編集書き出しの
+  入口2箇所だけがこの広い型を扱う設計にした。
+- **`POST /api/admin/shares`・`PATCH /api/admin/shares/[shareId]`**: `outputFormat==="pdf"`の場合、
+  通常のラスタ変換(`convertUploadsToPages`)を完全にバイパスし、`buildOutputPdf()`で結合した
+  PDFを`{shareId}/document.pdf`として保存、1ページ目だけを`convertPdfToImagePages()`で
+  ラスタライズしてサムネイルとして保存する(全ページをラスタライズする無駄を避けるため、
+  `convertPdfToImagePages()`に`{ maxPages: 1 }`オプションを追加した)。`pageCount`は
+  結合後PDFの実ページ数を保存する。差し替え(PATCH)時は、PDF↔ラスタのモード切り替えも含め、
+  不要になった旧ファイル(旧ページ画像・旧PDF本体)を新規保存後にまとめて掃除する。
+- **`POST /api/admin/shares/from-images`**: PDF編集画面の`ShareFromImagesForm`に
+  「PDFファイルとしてまとめて共有する」チェックボックスを追加。チェック時は各編集済み画像を
+  1ページずつ持つPDFとして`buildOutputPdf()`で結合し保存する(この場合は各ページの
+  個別の形式選択より優先される)。
+- **新規`GET /api/share/[shareId]/file`**: PDF本体をそのまま配信するAPI。既存のページ画像配信
+  (`/pages/[n]`)と全く同じ認証・有効期限チェックを行う。
+- **閲覧側UI**: `ShareLightbox`に`hasPdf`propを追加し、trueの場合はページ毎の`ZoomableImage`一覧
+  ではなく`<iframe src="/api/share/{id}/file">`(ブラウザ標準のPDFビューア)を表示する。
+  `GridShare`/`collection/[id]/page.tsx`経由でDBの`pdfStorageKey`有無を`hasPdf`として渡す。
+  **ハマった点**: `src/proxy.ts`が全レスポンスに一律`X-Frame-Options: DENY`・
+  CSPの`frame-ancestors 'none'`を設定していたため、このアプリ自身の`<iframe>`で
+  同一オリジンのPDF配信レスポンスを埋め込もうとしても、ブラウザ側でブロックされて表示できない
+  という問題があった(DENY/'none'は同一オリジンからのフレーム化も拒否するため)。
+  `/api/share/{shareId}/file`というパスだけの例外として、そのレスポンスに限り
+  `X-Frame-Options: SAMEORIGIN`・`frame-ancestors 'self'`を設定するよう修正して解決した。
+- **管理画面**: 共有一覧・共有詳細ページに「PDF」バッジを追加し、PDFのまま保存されている
+  共有がひと目で分かるようにした。`upload-dropzone.tsx`・`replace-pdf-form.tsx`の変換形式選択に
+  「PDFのまま(変換しない)」ボタンを追加。
+- 動作確認: Playwrightで(1)PDFファイルを「PDFのまま」でアップロードして共有を作成し、
+  `/api/share/{id}/file`が`Content-Type: application/pdf`かつ実際に`%PDF-`で始まる正しいPDFを
+  返すこと、(2)ギャラリーのカードをタップしたライトボックスに実際に`<iframe>`が
+  (画像一覧ではなく)表示され、そのsrcが`/api/share/{id}/file`を指していること、
+  (3)画像ファイル2枚を「PDFのまま」でアップロードすると1つのPDFに結合されて保存されること、
+  (4)編集画面で画像をアップロードし「PDFとしてまとめて共有する」で共有を作成すると
+  同様にPDFとして保存されることを確認。`npm run build`(本番ビルド)成功、
+  `npx tsc --noEmit` / `npm run lint`ともにエラー無し。確認用の共有データ・一時スクリプト・
+  Playwrightは作業後にすべて削除・アンインストール済み。
+
+---
+【2026-07-08】ギャラリーのカードサイズ拡大 + ログイン/ホーム画面追加ボタンのデザイン改善
+ユーザー要望:
+(1) ギャラリーをPCで開いた時に数秒間縦並びに見える現象が気になる、カードをもっと大きくしてほしい。
+(2) ログインボタン・「ホーム画面に追加」ボタンが質素すぎるので、イラスト(アイコン)を使ってほしい。
+
+調査(1): Playwrightで実際のブラウザを使い、ページ読み込み後の`grid-template-columns`の
+computed styleを時系列で計測するスクリプトを書いて検証した。
+- devビルド・本番ビルド(`npm run build && npm run start`)の両方で計測した結果、
+  「CSSが未適用の一瞬(readyState=loading時点でgrid-template-columns: none)」は
+  実際に発生するが、readyState=interactive/completeになる時点(だいたい300~400ms後)には
+  正しいグリッドレイアウトに落ち着き、その後3秒以上観測しても変化しなかった。
+  → CSS適用自体の遅延は一瞬(1秒未満)で、「3秒間ずっと縦並び」という状態は再現しなかった。
+- 一方、devサーバーを再起動した直後の実際のアクセスログでは
+  `GET /collection/... 200 in 2.1s (next.js: 1763ms...)` と出ており、
+  `npm run dev`はルートを初回アクセス時にオンデマンドでコンパイルするため、
+  サーバー再起動直後の最初の1回だけ2秒前後の遅延が発生することを確認した。
+  ユーザーが体感した「3秒くらい」はこのdevサーバーの初回コンパイル待ちだった可能性が高い
+  (本番ビルドではこの遅延は発生しない、かつdevサーバーでも2回目以降のアクセスは高速)。
+- 念のため`share-grid.tsx`のサムネイル画像に`loading="eager"`(先頭6枚のみ)を設定し、
+  画像が1枚ずつ遅延読み込みでポップインして見た目が落ち着かない印象になるのも軽減した。
+
+対応(1) カードサイズ: `share-grid.tsx`のグリッドを
+`grid-cols-2 gap-3 sm:grid-cols-[repeat(auto-fill,minmax(130px,1fr))]`から
+`grid-cols-2 gap-4 sm:grid-cols-[repeat(auto-fill,minmax(190px,1fr))] sm:gap-5`に変更し、
+カード自体もrounded-2xl→rounded-3xl・影(shadow-sm)・パディング拡大で少し高級感を出した。
+また`collection/[id]/page.tsx`のメインコンテナを`max-w-2xl`から`lg:max-w-4xl`にし、
+PCの広い画面ではより横幅を使ってカードが大きく並ぶようにした。
+
+対応(2) デザイン改善:
+- `login-form.tsx`: カード上部にアクセントカラーの円形バッジ+鍵アイコン(SVG、
+  admin選択画面と同じ手書きheroicons流儀)を追加し、タイトル・説明文も中央揃えに変更。
+- `collection/[id]/page.tsx`の「ログイン」ボタン: 小さな鍵付き矢印アイコンを追加。
+- `install-prompt-button.tsx`: 地味な丸ピルの文字だけボタンから、
+  アクセントカラーの縁取り+背景を薄く敷いたカード型ボタンに変更。
+  丸背景付きのダウンロード風アイコン、タイトル「ホーム画面に追加」+
+  サブテキスト「アプリのようにすぐ開けるようになります」の2行構成にした。
+
+検証: `npx tsc --noEmit`・`npm run lint`ともにエラー無し。`npm run build`成功。
+Playwrightで実際に本番ビルドを起動し、ギャラリー画面(カード3枚が大きく表示されること)と
+ログイン画面(鍵アイコンが表示されること)をスクリーンショットで目視確認。
+「ホーム画面に追加」ボタンは`beforeinstallprompt`イベントに依存するため、
+headless Chromiumでは発火せず自動確認はできなかった(コードレビューのみで確認)。
+一時スクリプト・スクリーンショット・本番サーバーはすべて後片付けし、開発サーバーに戻した。
+
+---
+【2026-07-08】タイトル周りのデザイン強化(ギャラリーヘッダー・カードタイトル・ライトボックス)
+ユーザー要望: 「タイトルとかも工夫してデザインが寂しくない感じにしてほしい」
+
+対応:
+- `collection/[id]/page.tsx`のヘッダーを、ただの左寄せテキスト+右上ボタンから、
+  PWAアイコン(`/icons/icon-192.png`、既存のPDF+シェアのイラストアイコンを流用)を
+  タイトル横に表示し、サブテキスト「社内の掲示物をまとめて確認できます・○件」を追加、
+  下に区切り線(border-b)を入れて他の要素と視覚的に分離した1つの「header」ブロックにまとめた。
+  (それまで浮いていた「○件」の中央寄せテキストは、このサブテキストに統合して削除)
+- `share-grid.tsx`のカードタイトルをtext-base font-medium→text-[15px] font-semibold
+  tracking-tightに強化。サムネイル左上に「PDF」または「○ページ」の半透明バッジを
+  (パスワード無し・実際にページがある場合のみ)追加し、情報量を増やした。
+- `share-lightbox.tsx`: これまでライトボックスを開いた後は共有のタイトルが
+  どこにも表示されない状態だったのに気づき、新規`ShareTitleHeader`コンポーネントを追加。
+  PDF直配信(iframe)・画像一覧の両方の表示直前に、タイトル+(PDFなら"PDF"バッジ、
+  複数ページなら"全Nページ"バッジ)を白文字で表示するようにした。
+
+検証: `npx tsc --noEmit`・`npm run lint`ともにエラー無し。開発サーバー上でPlaywright
+スクリーンショットを撮り、(1)ギャラリーヘッダーにアイコン+タイトル+サブテキスト+区切り線が
+正しく表示されること、(2)カードを開いたライトボックスにタイトルが表示されることを目視確認。
+一時スクリプト・スクリーンショットは作業後に削除済み。
+
+---
+【2026-07-08】ライトボックスの画像サイズ修正 + サイト全体のデザイン統一
+ユーザー要望: (1)カードを開いた画像が画面より大きくなってスクロールしないと見えない、
+(2)デザインがまだ寂しい、(3)他のページも同様にデザインを変えてほしい。
+
+対応(1) 画像サイズ修正(実バグ): `zoomable-image.tsx`は元々`h-auto w-full`(横幅いっぱい・
+縦は縦横比なり)で描画していたため、縦長のスキャン画像(A4等)は画面の高さを軽く超えて
+スクロールが必須になっていた。新規`fitContainer`propを追加し、trueの場合は
+`max-h-full max-w-full w-auto h-auto object-contain`で、高さが確定した親要素の中に
+縦横比を保ったまま収まるよう縮小表示するモードにした。`share-lightbox.tsx`を
+`fixed inset-0 flex flex-col`(ヘッダー行を`shrink-0`、本文を`min-h-0 flex-1 overflow-y-auto`)
+に再構成し、(a) PDF直配信(iframe)は`h-full`相当で画面いっぱいに、(b) 1ページのみの共有は
+新しい`fitContainer`モードで画面に収まるように、(c) 2ページ以上の場合は各ページに
+`max-h-[85dvh]`の上限を付けて(スクロールで複数ページを見る仕様は維持しつつ)
+1ページが極端に縦長になりすぎないようにした。閉じるボタンも`fixed`配置からヘッダー行内の
+通常配置に変更(常に上部に固定されるレイアウトになったため`fixed`が不要になった)。
+
+対応(2)(3) デザイン統一: 新規共通コンポーネント`src/components/ui/page-header.tsx`
+(`PageHeader`: アイコン+タイトル+サブテキスト+右側アクション、`SectionLabel`: カード内の
+アイコン付き小見出し)を追加し、以下のページに適用して見た目を統一した。
+- `collection/[id]/page.tsx`: 既存のヘッダーを`PageHeader`に置き換え(見た目は変えず整理)。
+- `admin/(dashboard)/layout.tsx`(全admin配下ページ共通のヘッダー): アプリアイコン画像+
+  「掲示板シェア/管理画面」の`PageHeader`に変更。
+- `admin/(dashboard)/page.tsx`(選択画面): 見出しにサブテキストを追加、2つのカードの
+  アイコンに円形のアクセントカラー背景バッジを追加。
+- `admin/(dashboard)/share/page.tsx`: `PageHeader`で「共有する」見出しを追加、
+  URL/アップロード/一覧の各セクションに`SectionLabel`でアイコン(リンク・アップロード・
+  リスト)を追加。
+- `admin/(dashboard)/edit/page.tsx`: `PageHeader`でサブテキスト追加。
+- `admin/(dashboard)/share/[shareId]/page.tsx`: 更新通知・設定・PDF更新・削除の
+  各カード見出しに`SectionLabel`でアイコン(ベル・歯車・リフレッシュ・ゴミ箱)を追加。
+- `password-form.tsx`(ライトボックス内のパスワード入力): `login-form.tsx`と同じ
+  円形バッジ+鍵アイコンを追加し統一。
+- `not-found.tsx`: コンパスアイコンのバッジを追加、戻るリンクをボタン化。
+
+検証: `npx tsc --noEmit`・`npm run lint`ともにエラー無し。`npm run build`成功。
+Playwrightでdevサーバーの公開ページ(ギャラリー・1ページのみの共有を開いたライトボックス)を
+スクリーンショットし、(1)画像がスクロール無しで画面に収まること、(2)ヘッダー等の見た目を確認。
+管理画面(`/admin`配下)はログインセッションの発行が安全機構によりブロックされたため、
+自動スクリーンショットでの確認はできず、コードレビューと型チェックのみで確認した
+(ユーザー自身が実際にログインして確認済みのアクセスログを`npm run dev`のログで確認)。
+一時スクリプト・スクリーンショットは作業後に削除済み。
+
+---
+【2026-07-08】管理画面選択カードの高さ・戻るボタン・「PDFのまま」表記・ログイン/ログアウトボタン・形式変換デフォルトの5点修正
+ユーザー要望:
+(1) 管理画面の「編集」「共有」選択カードの枠サイズが揃っていない、大きい方に合わせて。
+(2) 編集/共有ページに進んだ後、前のページ(選択画面)に戻れるボタンが欲しい。他のページにも必要。
+(3) 「PDFのまま(変換しない)」という表記は、アップロードが必ずしもPDFとは限らないので変えてほしい。
+(4) ログイン・ログアウトボタンが寂しいのでデザイン修正。
+(5) 形式変換のデフォルトはJPEGに。「推奨」等の説明書きも不要。
+
+対応(1): `admin/(dashboard)/page.tsx`の2枚の選択カードは、Linkがgridアイテムとして
+高さいっぱいに引き伸ばされていても、内側のCardには`h-full`が無く自分の中身の高さ
+(説明文の行数)に応じて実際の高さが決まっていたため、説明文が長い方(編集カード)だけが
+実際に高くなっていた。両方のCardのclassNameに`h-full`を追加し、grid既定の
+`align-items: stretch`で揃った高さいっぱいにCardが広がるようにして解消した。
+
+対応(2): 新規`PageHeader`(`src/components/ui/page-header.tsx`)に`backHref`/`backLabel`
+propを追加し、タイトル上に矢印アイコン付きの戻るリンクを表示できるようにした。
+`admin/(dashboard)/edit/page.tsx`・`admin/(dashboard)/share/page.tsx`の両方に
+`backHref="/admin"`(「選択画面に戻る」)を追加。既存の`admin/(dashboard)/share/[shareId]/page.tsx`
+の「← 共有一覧に戻る」リンクも、新設した共通`BackArrowIcon`を使う形に統一した。
+(PDF編集フロー内の「戻る」ボタン・`ShareFromImagesForm`の「戻る」ボタンは元々存在していたため対象外)
+
+対応(3): `src/lib/image/format.ts`の`OUTPUT_FORMATS`にある`pdf`選択肢のlabelを
+「PDFのまま(変換しない)」→「PDFとして保存(画像化しない)」に変更(画像アップロード時にも
+選べる選択肢のため、「PDFのまま」という既存PDF前提の表現が不正確だった)。
+`admin/(dashboard)/share/[shareId]/page.tsx`の詳細ページに出る「PDFのまま保存」バッジも
+「PDFとして保存」に合わせて修正。
+
+対応(4): 新規共通コンポーネント`src/components/ui/nav-action-button.tsx`
+(`NavActionButton`: 白背景+ボーダー+影のピル型、アイコンは常にアクセントカラー、
+ホバーでアクセント色に反応)を追加し、ギャラリーの「ログイン」ボタンと管理画面の
+「ログアウト」ボタン(`logout-button.tsx`)の両方をこれに置き換えて統一・強化した。
+ログアウトボタンには新規のログアウトアイコン(矢印+扉)を追加。
+
+対応(5): `src/lib/image/format.ts`の`DEFAULT_IMAGE_OUTPUT_FORMAT`を`"webp"`→`"jpeg"`に変更
+(アップロード時・編集画面の初期変換・PDF差し替え時のデフォルト選択に反映される)。
+`IMAGE_OUTPUT_FORMATS`の各labelから「(推奨・軽量)」「(可逆・高画質)」といった説明書きを削除し、
+「WebP」「JPEG」「PNG」という素の名称のみにした。
+
+検証: `npx tsc --noEmit`・`npm run lint`・`npm run build`すべてエラー無し。公開ページ
+(ギャライーのログインボタン)は本番ビルド起動+Playwrightスクリーンショットで見た目を確認。
+管理画面側(カード高さ揃い・戻るボタン・ログアウトボタン)は、前回同様ログインセッションの
+自動発行がこのセッションの安全機構でブロックされているため自動確認はできず、
+コードレビュー・型チェックのみで確認(CSSのgrid `align-items: stretch`によるカード高さ揃えは
+標準的な既知の挙動のため、コードレビューで十分と判断)。一時スクリプト・スクリーンショットは
+作業後に削除済み。
+
+---
+【2026-07-08】管理画面ダッシュボード全体をランダムURL化 + 大きな操作に確認ステップを追加
+ユーザー要望: (1)全てのページにランダムURLを有効にしてほしい。(2)編集完了時や共有アップロード
+など、大きな操作の場合は一回確認を入れるようにしてほしい。
+
+対応(1): AskUserQuestionで対象範囲を確認したところ「管理画面ダッシュボード全体(選択画面/
+編集/共有管理/共有詳細)」に、既存のログインページと同じランダムトークンを使う方針で確定。
+これまで管理画面ダッシュボードは`/admin/...`という固定パスで、未ログイン時のみ素の404を返す
+(パスを知られてもログインしなければ何も分からない)設計だったが、より徹底してURL自体も
+推測不可能にする対応。
+- ディレクトリを`src/app/admin/(dashboard)/*`から`src/app/a/[token]/admin/(dashboard)/*`へ
+  移動(PowerShellの`Move-Item`で移動。bashの`mv`は`[token]`のブラケットを含むパスで
+  Permission deniedになったため使えなかった)。結果、URLは
+  `/a/{ADMIN_LOGIN_PATH}/admin`・`/admin/edit`・`/admin/share`・`/admin/share/{shareId}`に。
+- セキュリティ判定を二重化: `src/proxy.ts`の`isAdminPage`判定を、固定文字列`"/admin"`ではなく
+  `` `/a/${process.env.ADMIN_LOGIN_PATH}/admin` `` から始まるパスかどうかに変更(セッションCookie
+  の有無をここで判定、無ければ素の404)。加えて`admin/(dashboard)/layout.tsx`自体にも
+  `token !== process.env.ADMIN_LOGIN_PATH`なら`notFound()`という独立したチェックを追加した
+  (誤ったトークンでアクセスされた場合、proxy.tsの文字列一致では弾けず素通りしてしまうため、
+  この2段目のチェックが実際の防御として機能する。ログインページ自身も元々同じパターンで
+  自己検証していたのに倣った)。
+- `src/app/page.tsx`(サイトルート`/`)は、以前は`/admin`へのリダイレクトだったが、これを
+  そのままにすると誰でもルートにアクセスするだけでLocationヘッダーから管理画面の秘密URLが
+  漏れてしまうため、閲覧用ギャラリー(`/collection/{GALLERY_PATH}`)へのリダイレクトに変更。
+- ログイン成功後の遷移先(`login-form.tsx`)、ログアウト失敗時のフォールバック遷移先
+  (`logout-button.tsx`、"/admin"→"/"に変更)、選択画面・編集・共有一覧・共有詳細ページ内の
+  全リンク、`ShareListItem`・`DeleteShareButton`・`UploadDropzone`・`ShareFromImagesForm`の
+  遷移先を、すべてこのトークン込みのURLに変更。サーバーコンポーネントは`params`から、
+  クライアントコンポーネントは`next/navigation`の`useParams()`からトークンを取得する方式に統一
+  (props経由でのバケツリレーを避けるため)。
+- README.mdのセットアップ手順・ディレクトリ構成図・セキュリティの節も実態に合わせて更新。
+- **ハマった点(既知の再発パターン)**: ルートフォルダ移動直後、`npx tsc --noEmit`が
+  `.next/types`配下の古い`/admin`ルートの型定義を参照してエラーになった。`rm -rf .next`で解消
+  (このアプリで過去に何度も発生している「ルート削除・移動後は.nextを丸ごと消す」パターン)。
+
+対応(2): 「大きな操作」を、実際にサーバー側へ新規作成・上書きを反映する操作と定義し、
+以下3箇所に、既存の削除ボタンと同じ「インラインで一度確認を挟む」UIパターン
+(ボタンを押すと確認メッセージ+「実行する」/「キャンセル」の2ボタンに切り替わる。
+`window.confirm()`のようなブラウザネイティブダイアログは、他の画面と見た目が統一されない
+ため使わなかった)を追加した。
+- `upload-dropzone.tsx`(新規共有アップロード): 「アップロードして共有ページを作成」を
+  押すと確認UIに切り替わり、もう一度押すと実際にアップロードする。
+- `share-from-images-form.tsx`(PDF編集完了→共有作成): 「共有ページを作成」も同様に
+  確認ステップを挟む。
+- `replace-pdf-form.tsx`(既存共有のPDF差し替え・上書き): 「この内容に更新する」も同様。
+(既存の`DeleteShareButton`は元々この確認パターンを実装済みだったため変更なし)
+
+検証: `npx tsc --noEmit`・`npm run lint`・`npm run build`すべてエラー無し。本番ビルドを
+起動し、curlで(1)`/`→ギャラリーへの307リダイレクト、(2)旧`/admin`・`/admin/edit`・
+`/admin/share`→すべて404、(3)誤ったトークンでの`/a/{wrong}/admin`→404、(4)正しいトークンだが
+未ログイン状態の`/a/{token}/admin`・`/admin/edit`・`/admin/share`→すべて404、(5)ログインページ
+`/a/{token}`自体→200、を実際のHTTPステータスコードで確認した。ログイン後の画面(確認UI含む)は
+前回・前々回と同様、テスト用ログインセッションの自動発行がこのセッションの安全機構で
+ブロックされているため実ブラウザでの目視確認はできておらず、コードレビュー・型チェックのみ。
+一時ファイルは作業後に削除済み。
+
+---
+【2026-07-08】アプリらしい見た目への刷新(下部タブバー・浮くカード背景・固定ヘッダー)
+ユーザー要望: 「もっと全体、前ページをアプリっぽいみためにできない?」
+AskUserQuestionで方向性を確認(複数選択+自由記述)し、「下部タブバー」「背景をうっすら
+グレーにしてカードを浮かせる」「ヘッダーを画面上部に固定」の3つ全部+「サイトと感じさせたく
+ない」という補足を得て実施。
+
+対応:
+- `src/app/globals.css`: `--background`を純白(#ffffff)からiOSの設定アプリ相当の薄いグレー
+  (#eef0f2)に変更。カード(bg-white)との明確なコントラストを保つため`--surface`(#f5f5f7→
+  #e3e5e9)・`--border`(#e5e5ea→#dcdee2)も合わせて少し濃くした。これによりカード・入力欄・
+  ボタン類は変更せず、ページ全体の背景だけが変わり、白いカードが「浮いて」見えるようになった
+  (この変更はグローバルCSS変数のため、全ページに自動的に反映される)。
+- 新規`src/app/a/[token]/admin/(dashboard)/bottom-tab-bar.tsx`: 管理画面専用の下部固定タブバー
+  (ホーム/編集/共有の3タブ、現在地に応じてアクセントカラーでハイライト、
+  `usePathname()`で判定)。`env(safe-area-inset-bottom)`でホームバー付き端末にも対応。
+  `admin/(dashboard)/layout.tsx`に組み込み、`<main>`に`pb-28`を追加してタブバーの下に
+  コンテンツが隠れないようにした。タブバーの「ホーム」が既存の「戻る」リンクと同じ役割を
+  果たすため、`edit/page.tsx`・`share/page.tsx`の`PageHeader`から`backHref`を削除して
+  UIの重複を解消(共有詳細ページの「← 共有一覧に戻る」は、タブでは表現されない1階層下の
+  ページなので残した)。
+- ヘッダー固定: `collection/[id]/page.tsx`(ギャラリー)と`admin/(dashboard)/layout.tsx`の
+  両方のヘッダーを`sticky top-0 z-20 bg-background/85 backdrop-blur-md`にし、
+  スクロールしても常に上部に表示され続けるようにした(半透明+ぼかしで、下にスクロールされる
+  コンテンツが透けて見えるネイティブアプリのナビゲーションバーのような質感にした)。
+  ギャラリー側は、ヘッダーをスクロール領域の外に出す構造上の都合で、
+  `<main>`一枚だったレイアウトを`<div>`(ヘッダー)+`<main>`(スクロール本体)の2段構成に整理。
+
+検証: `npx tsc --noEmit`・`npm run lint`・`npm run build`すべてエラー無し。本番ビルドを
+起動し、Playwrightでモバイル幅(390px)・デスクトップ幅の両方でギャラリー画面をスクリーンショット
+し、グレー背景+白カードの浮遊感、固定ヘッダーの見た目を確認した(表示件数が少なくスクロール量が
+無かったため、固定の実際の動作(スクロール追従)は目視できていないが、`position: sticky`は
+標準的なCSSのため大きなリスクはないと判断)。管理画面側の下部タブバーは、これまでと同様に
+テスト用ログインセッションの自動発行が安全機構でブロックされているため実ブラウザでの
+目視確認はできておらず、コードレビューのみ。一時スクリプト・スクリーンショットは削除済み。
+
+---
+【2026-07-08】背景色の濃さ調整
+ユーザー: 「背景ちょっと濃すぎる」。直前に導入した薄グレー背景(#eef0f2)が想定より濃く感じられた
+とのフィードバック。`globals.css`の`--background`を#eef0f2→#f5f6f7に、`--surface`を
+#e3e5e9→#ebedf0に、`--border`を#dcdee2→#e2e4e7に、それぞれ少し明るく調整
+(カードとの明度差の比率は保ったまま全体を底上げ)。`tsc`/lint確認後、Playwrightで見た目を
+再確認して問題ないことを確認。一時ファイルは削除済み。
+
+---
+【2026-07-08】本番運用(GitHub + Vercel + Supabase、無料枠)への移行対応
+ユーザー: 「いったんこれで完成でいいです。Githubやverselを使って運用したいんですが。無料がいい。
+動作は軽く、初回や、しばらくたってからの動作もスムーズなものがいい。」
+
+DB(SQLite)・ファイルストレージ(ローカルディスク)がともにVercelのサーバーレス環境では永続しない
+ため、外部サービスへの移行が必須。AskUserQuestionでDB/ストレージ構成を確認し、
+「Supabase(Postgres DB + Storageを1アカウントに一本化)」を選択。規模が大きい変更のため
+EnterPlanMode/ExitPlanModeでユーザー承認を得てから着手した(計画ファイル:
+`C:\Users\PC_User\.claude\plans\warm-popping-noodle.md`)。
+
+事前調査(WebSearch): (1) Prisma 7ではDB接続文字列をschema.prismaに書けなくなっており、
+`prisma.config.ts`(CLI/マイグレーション用)とアプリコード内のDriver Adapter(実行時用)に
+分けて渡す方式になっている。(2) Supabaseは「Direct connection(5432番、マイグレーション用)」と
+「Transaction pooler(6543番、`?pgbouncer=true`付き、サーバーレスの実行時クエリ用)」の
+2種類の接続文字列を提供しており、サーバーレスでは同時接続数の都合でpoolerが必須。
+(3) `@prisma/adapter-pg`(7.8.0、既存の`@prisma/adapter-better-sqlite3`と同じバージョン系列)が
+`pg`パッケージを内包し追加インストール不要(npm viewで確認)。(4) Vercel Hobby(無料)の
+Cron Jobsは1日1回まで(それ以上の頻度はデプロイ時にエラー)。
+
+対応:
+- **DB**: `prisma/schema.prisma`のprovider を`sqlite`→`postgresql`に変更。`src/lib/prisma.ts`を
+  `PrismaBetterSqlite3`→`@prisma/adapter-pg`の`PrismaPg`(DATABASE_URL=pooler接続)に差し替え、
+  `prisma.config.ts`はDIRECT_URL(直接接続)参照に変更。`better-sqlite3` /
+  `@prisma/adapter-better-sqlite3`を削除し`@prisma/adapter-pg`を追加(`npm uninstall`/`npm install`で)。
+  既存のSQLite用マイグレーション5件は`prisma/migrations-sqlite-archive/`へ退避(削除ではなく移動。
+  `rm -rf`は安全機構にブロックされたため`mv`で対応)、`migration_lock.toml`のproviderも更新。
+  新規のPostgres用マイグレーションは、実際のSupabase接続情報を受け取ってから作成する
+  (ローカルにPostgres接続先が無いため、今回はコード整合性のみ確認)。
+- **ストレージ**: コード変更ゼロ(`src/lib/storage/s3-storage.ts`のコメント通り、Supabase
+  StorageのS3互換APIは既存の`S3StorageAdapter`をそのまま使える)。`.env`側の環境変数設定のみで対応。
+- **期限切れクリーンアップ**: 新規`src/app/api/cron/cleanup-expired/route.ts`(既存の
+  `cleanupExpiredShares()`をそのまま呼ぶ。`Authorization: Bearer {CRON_SECRET}`で認証)、
+  新規`vercel.json`で1日1回(`0 18 * * *`=JST3時)登録。`src/instrumentation.ts`は
+  `process.env.VERCEL`が無い場合(=ローカル開発時)のみ従来のnode-cronを起動するようガード。
+- **コールドスタート対策(任意)**: 新規`/api/health`(DBアクセス無しの極小レスポンス)と
+  `.github/workflows/keep-warm.yml`(10分間隔でping、GitHub Actions無料枠)を追加。
+  効果を保証するものではない旨をREADMEに明記。
+- **.env.example / .env / README.md**: DATABASE_URL/DIRECT_URL/CRON_SECRETの説明を追加、
+  S3セクションをSupabase Storage前提に更新。README.mdに「本番運用(GitHub + Vercel + Supabase)」
+  の節を新設し、Supabaseプロジェクト作成→GitHub push→Vercelデプロイ→初回マイグレーションまでの
+  手順を明文化。実際の`.env`もDATABASE_URL/DIRECT_URL/S3系/CRON_SECRETを空のプレースホルダーに
+  更新済み(Supabase接続情報が無い状態では`npm run dev`のDB関連操作は動かない状態になっている、
+  ユーザーへの引き継ぎ事項)。
+
+検証: `npx tsc --noEmit`・`npm run lint`・`npm run build`すべてエラー無し(Postgres未接続でも
+静的生成・型チェックは通ることを確認。Prisma Clientの生成自体はDB接続不要で`prisma generate`のみで可能)。
+Supabase/GitHub/Vercelの実アカウント作成はユーザー側の作業のため、接続情報を受け取り次第
+`prisma migrate deploy`を代行する旨を伝えた。gitはまだ一度もコミットされていない状態
+(このセッションでは明示的な依頼が無い限りコミット・pushは行わない方針を維持)。
+
+(以降、追加の改善や不具合対応はこのファイルに追記していく)
