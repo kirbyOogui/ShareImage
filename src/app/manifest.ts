@@ -9,6 +9,11 @@ export default function manifest(): MetadataRoute.Manifest {
     short_name: "掲示板シェア",
     description: "社内掲示物をスマホで簡単・安全に閲覧できる共有サービス",
     start_url: `/collection/${getGalleryPath()}`,
+    // scopeを省略するとstart_urlのディレクトリ(/collection/)がデフォルトの適用範囲になり、
+    // それより外の/a/[token](管理者ログイン)への遷移がスコープ外と判定されてしまう。
+    // iOSのホーム画面アプリはスコープ外への遷移をstandalone内で処理できず、
+    // Safari(通常のブラウザ)を別途開いてアプリから抜けてしまうため、scopeをオリジン全体に広げる。
+    scope: "/",
     display: "standalone",
     background_color: "#ffffff",
     theme_color: "#ffffff",
