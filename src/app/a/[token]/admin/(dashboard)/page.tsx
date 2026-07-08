@@ -54,7 +54,7 @@ export default async function AdminChoicePage({ params }: { params: Promise<{ to
         <Link href={`/a/${token}/admin/edit`}>
           <Card
             className="flex h-full min-h-64 flex-col items-center justify-center gap-4 p-8 text-center
-              transition-colors hover:bg-surface sm:min-h-72"
+              transition-all hover:bg-surface active:scale-[0.97] active:bg-surface sm:min-h-72"
           >
             <span className="flex h-28 w-28 items-center justify-center rounded-full bg-accent/10 text-accent sm:h-32 sm:w-32">
               <EditIcon />
@@ -68,7 +68,7 @@ export default async function AdminChoicePage({ params }: { params: Promise<{ to
         <Link href={`/a/${token}/admin/share`}>
           <Card
             className="flex h-full min-h-64 flex-col items-center justify-center gap-4 p-8 text-center
-              transition-colors hover:bg-surface sm:min-h-72"
+              transition-all hover:bg-surface active:scale-[0.97] active:bg-surface sm:min-h-72"
           >
             <span className="flex h-28 w-28 items-center justify-center rounded-full bg-accent/10 text-accent sm:h-32 sm:w-32">
               <ShareIcon />

@@ -100,8 +100,8 @@ export function ShareFromImagesForm({ pages, onCancel }: { pages: EditorPage[]; 
             type="button"
             key={opt.value}
             onClick={() => setExpiresIn(opt.value)}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors
-              ${expiresIn === opt.value ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70"}`}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition-all active:scale-95
+              ${expiresIn === opt.value ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70 active:bg-border"}`}
           >
             {opt.label}
           </button>

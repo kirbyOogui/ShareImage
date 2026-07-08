@@ -80,8 +80,8 @@ export function ReplacePdfForm({ shareId }: { shareId: string }) {
             type="button"
             key={f.value}
             onClick={() => setOutputFormat(f.value)}
-            className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-colors
-              ${outputFormat === f.value ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70"}`}
+            className={`rounded-xl px-3 py-1.5 text-xs font-medium transition-all active:scale-95
+              ${outputFormat === f.value ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70 active:bg-border"}`}
           >
             {f.label}
           </button>

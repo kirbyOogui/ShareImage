@@ -169,7 +169,7 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
         <button
           type="button"
           onClick={() => zoomRef.current?.resetTransform()}
-          className="rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70 transition-colors"
+          className="rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70 transition-all active:scale-95 active:bg-border"
         >
           ズームを戻す
         </button>
@@ -185,8 +185,8 @@ export function DrawTool({ dataUrl, width, height, onApply }: DrawToolProps) {
         <button
           type="button"
           onClick={() => setPickingColor((prev) => !prev)}
-          className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors
-            ${pickingColor ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70"}`}
+          className={`rounded-xl px-4 py-2 text-sm font-medium transition-all active:scale-95
+            ${pickingColor ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70 active:bg-border"}`}
         >
           {pickingColor ? "画像をタップして色を拾う..." : "スポイトで拾う"}
         </button>

@@ -56,8 +56,8 @@ export function FormatTool({ dataUrl, width, height, currentFormat, onApply }: F
             type="button"
             key={f.value}
             onClick={() => setSelected(f.value)}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors
-              ${selected === f.value ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70"}`}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition-all active:scale-95
+              ${selected === f.value ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70 active:bg-border"}`}
           >
             {f.label}
           </button>

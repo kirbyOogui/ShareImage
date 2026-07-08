@@ -17,7 +17,7 @@ export function ShareListItem({ share, token }: { share: ShareSummary; token: st
     <Link
       href={`/a/${token}/admin/share/${share.id}`}
       className="flex items-center justify-between rounded-2xl border border-border bg-white px-5 py-4
-        transition-colors hover:bg-surface"
+        transition-all hover:bg-surface active:scale-[0.98] active:bg-surface"
     >
       <div className="flex flex-col gap-1">
         <span className="text-[15px] font-medium">{share.title || "(無題)"}</span>

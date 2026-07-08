@@ -94,7 +94,7 @@ export default async function ShareDetailPage({
       <div className="flex items-center justify-between">
         <Link
           href={`/a/${token}/admin/share`}
-          className="inline-flex items-center gap-1 text-sm text-foreground/50 hover:text-foreground"
+          className="inline-flex items-center gap-1 text-sm text-foreground/50 transition-opacity hover:text-foreground active:opacity-50"
         >
           <BackArrowIcon />
           共有一覧に戻る

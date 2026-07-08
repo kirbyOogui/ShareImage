@@ -61,8 +61,8 @@ export function ResizeTool({ dataUrl, width, height, onApply }: ResizeToolProps)
             type="button"
             key={percent}
             onClick={() => setScale(percent)}
-            className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors
-              ${scalePercent === percent ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70"}`}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition-all active:scale-95
+              ${scalePercent === percent ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70 active:bg-border"}`}
           >
             {percent}%
           </button>

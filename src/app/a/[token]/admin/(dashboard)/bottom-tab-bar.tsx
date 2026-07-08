@@ -79,8 +79,9 @@ export function BottomTabBar({ token }: { token: string }) {
           <Link
             key={href}
             href={href}
-            className={`flex flex-1 flex-col items-center gap-1 py-2.5 text-xs font-medium transition-colors
-              ${active ? "text-accent" : "text-foreground/45 hover:text-foreground/70"}`}
+            className={`flex flex-1 flex-col items-center gap-1 py-2.5 text-xs font-medium transition-all
+              active:scale-90
+              ${active ? "text-accent" : "text-foreground/45 hover:text-foreground/70 active:text-accent"}`}
           >
             <Icon active={active} />
             {label}

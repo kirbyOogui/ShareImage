@@ -286,7 +286,7 @@ export function InpaintTool({ dataUrl, width, height, onApply }: InpaintToolProp
         <button
           type="button"
           onClick={() => zoomRef.current?.resetTransform()}
-          className="shrink-0 rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70 transition-colors"
+          className="shrink-0 rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70 transition-all active:scale-95 active:bg-border"
         >
           ズームを戻す
         </button>

@@ -35,13 +35,13 @@ export default async function AdminLayout({
         <div className="mx-auto max-w-3xl px-6 py-4">
           <PageHeader
             icon={
-              <Link href={adminHref}>
+              <Link href={adminHref} className="inline-block transition-transform active:scale-90">
                 {/* eslint-disable-next-line @next/next/no-img-element -- 固定の静的アセットを1枚表示するだけのため */}
                 <img src="/icons/icon-192.png" alt="" className="h-10 w-10 rounded-xl shadow-sm shadow-black/10" />
               </Link>
             }
             title={
-              <Link href={adminHref} className="hover:opacity-70">
+              <Link href={adminHref} className="transition-opacity hover:opacity-70 active:opacity-50">
                 掲示板シェア
               </Link>
             }

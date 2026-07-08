@@ -104,8 +104,10 @@ export default async function CollectionPage({
       </div>
 
       <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 px-4 py-6 lg:max-w-4xl">
-        <InstallPromptButton />
-        <SubscribeUpdatesButton />
+        <div className="flex flex-wrap justify-center gap-3">
+          <InstallPromptButton />
+          <SubscribeUpdatesButton />
+        </div>
 
         {visibleShares.length === 0 ? (
           <p className="text-center text-sm text-foreground/40">まだ共有はありません</p>

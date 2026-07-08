@@ -5,8 +5,8 @@ import type { ReactNode } from "react";
 
 const CLASS_NAME =
   "inline-flex items-center gap-2 rounded-full border border-border bg-white px-4 py-2 text-sm " +
-  "font-medium text-foreground/70 shadow-sm shadow-black/[0.03] transition-colors " +
-  "hover:border-accent/30 hover:bg-accent/5 hover:text-accent";
+  "font-medium text-foreground/70 shadow-sm shadow-black/[0.03] transition-all " +
+  "hover:border-accent/30 hover:bg-accent/5 hover:text-accent active:scale-95 active:bg-accent/10";
 
 /**
  * ログイン/ログアウトなど、ヘッダーに置く「アイコン+文字」の認証系ボタンの共通デザイン。

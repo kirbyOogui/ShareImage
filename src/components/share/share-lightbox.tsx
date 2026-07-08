@@ -100,7 +100,7 @@ export function ShareLightbox({ shareId, title, hasPassword, hasPdf, pages, onCl
           type="button"
           onClick={onClose}
           aria-label="閉じる"
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-lg text-white transition-colors hover:bg-white/20"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-lg text-white transition-all hover:bg-white/20 active:scale-90 active:bg-white/30"
         >
           ✕
         </button>

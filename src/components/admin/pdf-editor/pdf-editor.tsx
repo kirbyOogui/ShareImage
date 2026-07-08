@@ -146,8 +146,8 @@ export function PdfEditor() {
               setSelectedIndex(i);
               setShowShareForm(false);
             }}
-            className={`shrink-0 overflow-hidden rounded-xl border-2 transition-colors
-              ${i === selectedIndex ? "border-accent" : "border-border"}`}
+            className={`shrink-0 overflow-hidden rounded-xl border-2 transition-all active:scale-90
+              ${i === selectedIndex ? "border-accent" : "border-border active:border-accent/50"}`}
           >
             {/* eslint-disable-next-line @next/next/no-img-element -- サムネイル一覧のため素のimgで十分 */}
             <img src={page.dataUrl} alt={`${page.pageNumber}ページ`} className="h-24 w-auto" />
@@ -163,7 +163,7 @@ export function PdfEditor() {
               onClick={handleUndo}
               disabled={history.length === 0}
               className="rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70
-                transition-colors disabled:opacity-40"
+                transition-all active:scale-95 active:bg-border disabled:opacity-40"
             >
               ← 1つ前に戻る
             </button>
@@ -172,7 +172,7 @@ export function PdfEditor() {
               onClick={handleRedo}
               disabled={future.length === 0}
               className="rounded-xl bg-surface px-4 py-2 text-sm font-medium text-foreground/70
-                transition-colors disabled:opacity-40"
+                transition-all active:scale-95 active:bg-border disabled:opacity-40"
             >
               1つ先に進む →
             </button>
@@ -181,8 +181,8 @@ export function PdfEditor() {
                 type="button"
                 key={t}
                 onClick={() => setTool(t)}
-                className={`rounded-xl px-4 py-2 text-sm font-medium transition-colors
-                  ${tool === t ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70"}`}
+                className={`rounded-xl px-4 py-2 text-sm font-medium transition-all active:scale-95
+                  ${tool === t ? "bg-accent text-accent-foreground" : "bg-surface text-foreground/70 active:bg-border"}`}
               >
                 {TOOL_LABELS[t]}
               </button>

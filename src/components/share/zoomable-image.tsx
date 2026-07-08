@@ -104,7 +104,7 @@ export function ZoomableImage({
         disabled={downloading}
         aria-label="画像を保存"
         className="absolute right-3 top-3 z-10 flex h-10 w-10 items-center justify-center rounded-full
-          bg-black/50 text-white backdrop-blur-sm transition-colors hover:bg-black/70 disabled:opacity-50"
+          bg-black/50 text-white backdrop-blur-sm transition-all hover:bg-black/70 active:scale-90 active:bg-black/80 disabled:opacity-50"
       >
         <DownloadIcon />
       </button>

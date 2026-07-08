@@ -139,7 +139,7 @@ export function SubscribeUpdatesButton() {
   if (status === "denied") {
     return (
       <div
-        className="mx-auto flex w-full max-w-sm items-center gap-3 rounded-2xl border border-border
+        className="flex max-w-sm flex-1 basis-[calc(50%-0.375rem)] items-center gap-3 rounded-2xl border border-border
           bg-surface px-4 py-3 text-left opacity-60"
       >
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-foreground/10 text-foreground/40">
@@ -160,9 +160,9 @@ export function SubscribeUpdatesButton() {
       type="button"
       disabled={pending}
       onClick={subscribed ? handleUnsubscribe : handleSubscribe}
-      className={`mx-auto flex w-full max-w-sm items-center gap-3 rounded-2xl border px-4 py-3 text-left
-        transition-colors disabled:opacity-40
-        ${subscribed ? "border-border bg-surface hover:bg-border" : "border-accent/20 bg-accent/5 hover:bg-accent/10"}`}
+      className={`flex max-w-sm flex-1 basis-[calc(50%-0.375rem)] items-center gap-3 rounded-2xl border px-4 py-3 text-left
+        transition-all disabled:opacity-40 active:scale-95
+        ${subscribed ? "border-border bg-surface hover:bg-border active:bg-border" : "border-accent/20 bg-accent/5 hover:bg-accent/10 active:bg-accent/15"}`}
     >
       <span
         className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full

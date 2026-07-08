@@ -27,8 +27,11 @@
 html {
   background: var(--background);
   color: var(--foreground);
-  /* iOSのラバーバンド(引っ張った時の跳ね返り)による、固定/追従ヘッダーが一瞬浮いて見える現象を防ぐ */
-  overscroll-behavior-y: none;
+  /* 縦方向: iOSのラバーバンド(引っ張った時の跳ね返り)による、固定/追従ヘッダーが
+     一瞬浮いて見える現象を防ぐ。横方向: Safari/Chromeの「画面端からスワイプで前のページに戻る」
+     ネイティブジェスチャーを無効化し、アプリらしく他ページへのスワイプ遷移を防ぐ
+     (Androidの画面端スワイプによるOSレベルの「戻る」操作はWeb側から制御できないため対象外)。 */
+  overscroll-behavior: none;
 }
 
 body {
@@ -36,5 +39,5 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans);
   -webkit-tap-highlight-color: transparent;
-  overscroll-behavior-y: none;
+  overscroll-behavior: none;
 }

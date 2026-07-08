@@ -45,7 +45,7 @@ export function PageHeader({
       {backHref && (
         <Link
           href={backHref}
-          className="inline-flex w-fit items-center gap-1 text-sm text-foreground/50 hover:text-foreground"
+          className="inline-flex w-fit items-center gap-1 text-sm text-foreground/50 transition-opacity hover:text-foreground active:opacity-50"
         >
           <BackArrowIcon />
           {backLabel}

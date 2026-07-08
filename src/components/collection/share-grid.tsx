@@ -51,7 +51,7 @@ export function ShareGrid({ shares }: { shares: GridShare[] }) {
                   setOpenShareId(share.id);
                 }
               }}
-              className="flex w-full cursor-pointer flex-col gap-2.5 rounded-3xl border border-border bg-white p-3 text-left shadow-sm shadow-black/[0.03] transition-colors hover:bg-surface"
+              className="flex w-full cursor-pointer flex-col gap-2.5 rounded-3xl border border-border bg-white p-3 text-left shadow-sm shadow-black/[0.03] transition-all hover:bg-surface active:scale-[0.97] active:bg-surface"
             >
               <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-2xl bg-surface">
                 {share.hasPassword || share.pageCount === 0 ? (
@@ -80,7 +80,7 @@ export function ShareGrid({ shares }: { shares: GridShare[] }) {
                     onClick={(event) => handleThumbnailDownload(event, share)}
                     aria-label="画像を保存"
                     className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full
-                      bg-black/50 text-white backdrop-blur-sm transition-colors hover:bg-black/70"
+                      bg-black/50 text-white backdrop-blur-sm transition-all hover:bg-black/70 active:scale-90 active:bg-black/80"
                   >
                     <DownloadIcon className="h-4 w-4" />
                   </button>

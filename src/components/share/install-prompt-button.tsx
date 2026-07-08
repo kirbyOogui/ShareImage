@@ -64,8 +64,8 @@ export function InstallPromptButton() {
     <button
       type="button"
       onClick={handleInstall}
-      className="mx-auto flex w-full max-w-sm items-center gap-3 rounded-2xl border border-accent/20
-        bg-accent/5 px-4 py-3 text-left transition-colors hover:bg-accent/10"
+      className="flex max-w-sm flex-1 basis-[calc(50%-0.375rem)] items-center gap-3 rounded-2xl border border-accent/20
+        bg-accent/5 px-4 py-3 text-left transition-all hover:bg-accent/10 active:scale-95 active:bg-accent/15"
     >
       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent/10 text-accent">
         <InstallIcon />

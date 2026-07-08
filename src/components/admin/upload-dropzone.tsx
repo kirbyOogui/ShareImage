@@ -156,7 +156,7 @@ export function UploadDropzone() {
                 type="button"
                 onClick={() => removeFile(i)}
                 aria-label={`${f.name}を選択解除`}
-                className="shrink-0 text-foreground/40 hover:text-red-600"
+                className="shrink-0 text-foreground/40 transition-all hover:text-red-600 active:scale-90 active:text-red-700"
               >
                 ✕
               </button>

@@ -79,7 +79,7 @@ export function LoginForm({ backHref, redirectTo }: { backHref: string; redirect
       </Card>
       <Link
         href={backHref}
-        className="mx-auto mt-6 block w-fit text-xs text-foreground/40 underline underline-offset-2 hover:text-foreground/60"
+        className="mx-auto mt-6 block w-fit text-xs text-foreground/40 underline underline-offset-2 transition-opacity hover:text-foreground/60 active:opacity-50"
       >
         ← 一覧に戻る
       </Link>
