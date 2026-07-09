@@ -1703,3 +1703,72 @@ standalone表示から抜けてSafariが開いてしまっていることを確�
   確認後、一時スクリプト・テスト画像・スクリーンショット・Playwrightは削除・アンインストール済み。
   開発サーバーも停止済み。スワイプ戻るの実際の効果(touch-actionの効き目)は実機でのみ
   確認可能なため、ユーザーへの確認を依頼する。
+
+---
+【2026-07-09】スワイプ戻る対策の追加強化(JS側でのpreventDefault)
+
+前回のtouch-action: pan-y pinch-zoom(CSS)だけでは対策しきれておらず、iPhoneの
+ホーム画面PWA(standalone)で「アプリ全体で常に」スワイプ戻るが再現するとの報告。
+AskUserQuestionで再現環境を確認したところ、ホーム画面追加のstandalone PWAでのみ
+発生(Safariブラウザタブでは未確認)。
+
+- **原因**: iOSのWKWebViewベースのstandalone PWAでは、画面端からのスワイプ戻る
+  ジェスチャーがCSSのtouch-actionだけでは完全に抑止できない端末・OSバージョンが
+  あることが知られている(ジェスチャー認識自体がタッチ開始直後に決定されるため、
+  CSSの制約が間に合わない/優先されないケースがある)。
+- **対策**: `src/components/edge-swipe-guard.tsx`を新規作成し、`document`に
+  `touchstart`を`{ passive: false }`で登録。タッチ開始位置が画面左右端から20px
+  以内かつ1本指の場合のみ`preventDefault()`を呼び、ジェスチャー自体の発火を
+  未然に止める。2本指以上(ピンチズーム操作)は対象外とし、既に横スクロールを
+  個別許可している要素(PDF編集のサムネイル一覧)は`data-pan-x`属性を目印にして
+  ガードの対象外にした(`pdf-editor.tsx`の該当divに`data-pan-x`を追加)。
+  `src/app/layout.tsx`のbody直下にマウントし、アプリ全体に適用。
+- 検証: `npx tsc --noEmit` / `npm run lint` ともにエラー無し。一時的にPlaywrightを
+  再導入し、タッチ対応コンテキスト(`hasTouch: true`)の実ページで本物の`TouchEvent`/
+  `Touch`を5パターン(左端1本指→prevent される、画面中央→されない、左端だが
+  `data-pan-x`要素上→されない、左端+2本指→されない、右端1本指→prevent される)
+  発火させ、全て期待通りの`defaultPrevented`挙動になることを確認。確認後、
+  一時スクリプトは削除・Playwrightはアンインストール済み(package-lock.jsonの
+  差分も元に戻した)。開発サーバーは起動していない。実機での最終確認(それでも
+  直らない場合はさらに強い対策が必要)はユーザーに依頼する。
+
+---
+【2026-07-09】スワイプ戻る対策の第3段(履歴レベルでの無効化)
+
+JS(touchstart)対策後も実機で改めて確認したところ「直らない」との報告。AskUserQuestionで
+実際の挙動を確認すると、アプリ内の前の画面へ実際に遷移してしまうとのこと(見た目だけの
+アニメーションではなく、本当にNext.jsのルーティングが前のページへ戻っていた)。
+
+- **原因の再整理**: iOSのWKWebViewベースのstandalone PWAでは、画面端スワイプ戻る
+  ジェスチャーがDOMのタッチイベントより手前(ネイティブのジェスチャー認識レベル)で
+  確定してしまう端末があり、CSSのtouch-actionもJSのtouchstart側でのpreventDefault
+  も、ジェスチャー自体の発火を止めきれないケースがあると判明。「ジェスチャーを止める」
+  アプローチの限界と判断し、方針を転換。
+- **対策**: 「ジェスチャーを止める」のではなく「ジェスチャーの結果として起きるアプリ内の
+  戻る遷移そのものを無効化する」レイヤーとして`src/components/back-navigation-trap.tsx`
+  を新規作成した。このアプリの画面遷移は全てLink/router.pushによる「進む」遷移のみで、
+  どこからも`router.back()`/`history.back()`を呼んでいない(grepで確認済み)ため、
+  観測される`popstate`イベントは全てスワイプ等による意図しない「戻る」とみなしてよい、
+  という前提に基づく。具体的には(1)`usePathname()`で現在地を追跡し、遷移のたびに
+  現在地の複製エントリを1つ`history.pushState`で積んでおく(戻る操作が来てもまず
+  複製=同じ画面に着地する保険)、(2)`popstate`を検知するたびに`history.pushState`で
+  現在地を積み直しつつ、Next.jsの描画も`router.replace(現在地)`で揃え直す、という
+  2段構えにした。`EdgeSwipeGuard`(前回追加分)は残しつつ、`src/app/layout.tsx`の
+  body直下に追加でマウントしている。
+- 検証: `npx tsc --noEmit` / `npm run lint` はエラー無し。実際のブラウザ挙動(popstateの
+  ハンドリング)はCSSやネイティブジェスチャーに依存せず検証可能なため、一時的に
+  Playwrightを再導入し、開発サーバー(`npm run dev`)を起動した状態で、app router配下に
+  一時テストページ2つ(`/swipetesta`⇄`/swipetestb`、Linkで相互遷移するだけの最小ページ)
+  を作成して検証した。実ブラウザでA→B(Linkクリック)の後、`page.goBack()`(ブラウザの
+  戻る操作=popstateを発生させる、実機のスワイプ戻ると同じ種類のイベント)を連続2回
+  実行しても、両方ともURL・表示内容ともBに留まり続けることを確認(戻る遷移が実際に
+  無効化されていることを裏取りできた)。
+  **ハマった点**: 最初`__swipe_test_a`のようにアンダースコア始まりのフォルダ名で
+  一時ページを作ったところ404になった。Next.js App
+  Routerではアンダースコア始まりのフォルダは「プライベートフォルダ」としてルーティング
+  対象外になる仕様のため、`swipetesta`/`swipetestb`のように普通の名前に変更して解決した。
+  確認後、一時テストページ・一時スクリプトは削除、Playwrightはアンインストール
+  (package-lock.jsonの差分も元に戻した)、開発サーバー(および子プロセス)も
+  taskkillで停止済み。`.next/dev/types`配下に残っていた削除済みテストページの型
+  キャッシュも削除し、`tsc`/`lint`が改めてクリーンであることを確認済み。
+  実機での最終確認をユーザーに依頼する。

@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
 import { SPLASH_SCREENS, splashFileName, splashMediaQuery } from "@/lib/pwa/splash-screens";
+import { EdgeSwipeGuard } from "@/components/edge-swipe-guard";
+import { BackNavigationTrap } from "@/components/back-navigation-trap";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -65,7 +67,11 @@ export default async function RootLayout({
           />
         ))}
       </head>
-      <body className="min-h-full flex flex-col bg-background text-foreground">{children}</body>
+      <body className="min-h-full flex flex-col bg-background text-foreground">
+        <EdgeSwipeGuard />
+        <BackNavigationTrap />
+        {children}
+      </body>
     </html>
   );
 }

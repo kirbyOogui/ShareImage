@@ -138,8 +138,10 @@ export function PdfEditor() {
   return (
     <div className="flex flex-col gap-6">
       {/* body側で画面端スワイプ戻る対策としてtouch-action: pan-yにしているため、
-          このサムネイル一覧だけは横方向のタッチスクロールを個別に許可し直す */}
-      <div className="flex gap-2 overflow-x-auto pb-2 [touch-action:pan-x]">
+          このサムネイル一覧だけは横方向のタッチスクロールを個別に許可し直す。
+          data-pan-xはEdgeSwipeGuard(画面端タッチのpreventDefault)がこの領域を
+          対象外にするための目印。 */}
+      <div className="flex gap-2 overflow-x-auto pb-2 [touch-action:pan-x]" data-pan-x>
         {pages.map((page, i) => (
           <button
             key={page.pageNumber}
