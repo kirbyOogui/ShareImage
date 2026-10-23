@@ -76,7 +76,7 @@ export async function convertPdfToImagePages(
   const loadingTask = getDocument({
     data: new Uint8Array(pdfBuffer),
     useSystemFonts: true,
-    isEvalSupported: false,
+    // pdfjs-dist 6 は eval を一切使わなくなったため、isEvalSupported の指定は不要(オプション自体が廃止)
     cMapUrl: toFactoryUrl(pdfjsDistRoot, "cmaps"),
     cMapPacked: true,
     standardFontDataUrl: toFactoryUrl(pdfjsDistRoot, "standard_fonts"),
@@ -139,7 +139,7 @@ export async function convertPdfToImagePages(
 
     return pages;
   } finally {
-    await pdfDocument.destroy();
+    await loadingTask.destroy();
   }
 }
 
